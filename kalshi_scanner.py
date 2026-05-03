@@ -1,7 +1,5 @@
 """
 Kalshi Morning Market Scanner
-Fetches all open Kalshi markets, scores them via Claude for edge,
-and emails you the top niche picks each morning.
 """
 
 import os
@@ -14,7 +12,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
 import anthropic
 
@@ -32,14 +30,15 @@ def get_private_key():
     return serialization.load_pem_private_key(key_bytes, password=None)
 
 def make_auth_headers(method: str, path: str) -> dict:
+    """path should be just the path, no query string e.g. /trade-api/v2/markets"""
     timestamp = str(int(time.time() * 1000))
     message = f"{timestamp}{method}{path}".encode()
     private_key = get_private_key()
     signature = private_key.sign(
         message,
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH,
+        asym_padding.PSS(
+            mgf=asym_padding.MGF1(hashes.SHA256()),
+            salt_length=asym_padding.PSS.MAX_LENGTH,
         ),
         hashes.SHA256(),
     )
@@ -56,12 +55,14 @@ def fetch_all_markets() -> list[dict]:
 
     print("Fetching Kalshi markets...")
     for page in range(20):
-        path = "/trade-api/v2/markets"
+        # Sign only the path, never the query string
+        sign_path = "/trade-api/v2/markets"
+        headers = make_auth_headers("GET", sign_path)
+
         params: dict = {"limit": 100, "status": "open"}
         if cursor:
             params["cursor"] = cursor
 
-        headers = make_auth_headers("GET", path)
         resp = requests.get(
             f"{KALSHI_BASE}/markets",
             headers=headers,
@@ -108,11 +109,11 @@ def score_markets(candidates: list[dict]) -> list[dict]:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     today = datetime.now().strftime("%A, %B %d, %Y")
 
-    system_prompt = """You are a serious, data-driven prediction market analyst advising a trader who wants niche, 
+    system_prompt = """You are a serious, data-driven prediction market analyst advising a trader who wants niche,
 under-the-radar markets — NOT mainstream geopolitical or sports headlines.
 
-The trader loves markets like: "Will credit card rates be capped in 2026?", "Will the FDA approve a 
-psychedelic substance for medical use?", "Will the Dietary Supplement Listing Act pass?" — 
+The trader loves markets like: "Will credit card rates be capped in 2026?", "Will the FDA approve a
+psychedelic substance for medical use?", "Will the Dietary Supplement Listing Act pass?" —
 regulatory, legislative, and corporate action markets that most traders ignore.
 
 When evaluating markets:
@@ -124,7 +125,7 @@ When evaluating markets:
     user_prompt = f"""Today is {today}.
 
 Below are {len(candidates)} active Kalshi markets sorted by volume (lowest first = most niche).
-Cross-reference these with your knowledge of current events and pick the top 6 that a serious trader 
+Cross-reference these with your knowledge of current events and pick the top 6 that a serious trader
 should research further.
 
 Markets:
@@ -283,8 +284,6 @@ if __name__ == "__main__":
 EOFcat > kalshi_scanner.py << 'EOF'
 """
 Kalshi Morning Market Scanner
-Fetches all open Kalshi markets, scores them via Claude for edge,
-and emails you the top niche picks each morning.
 """
 
 import os
@@ -297,7 +296,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
 import anthropic
 
@@ -315,14 +314,15 @@ def get_private_key():
     return serialization.load_pem_private_key(key_bytes, password=None)
 
 def make_auth_headers(method: str, path: str) -> dict:
+    """path should be just the path, no query string e.g. /trade-api/v2/markets"""
     timestamp = str(int(time.time() * 1000))
     message = f"{timestamp}{method}{path}".encode()
     private_key = get_private_key()
     signature = private_key.sign(
         message,
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH,
+        asym_padding.PSS(
+            mgf=asym_padding.MGF1(hashes.SHA256()),
+            salt_length=asym_padding.PSS.MAX_LENGTH,
         ),
         hashes.SHA256(),
     )
@@ -339,12 +339,14 @@ def fetch_all_markets() -> list[dict]:
 
     print("Fetching Kalshi markets...")
     for page in range(20):
-        path = "/trade-api/v2/markets"
+        # Sign only the path, never the query string
+        sign_path = "/trade-api/v2/markets"
+        headers = make_auth_headers("GET", sign_path)
+
         params: dict = {"limit": 100, "status": "open"}
         if cursor:
             params["cursor"] = cursor
 
-        headers = make_auth_headers("GET", path)
         resp = requests.get(
             f"{KALSHI_BASE}/markets",
             headers=headers,
@@ -391,11 +393,11 @@ def score_markets(candidates: list[dict]) -> list[dict]:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     today = datetime.now().strftime("%A, %B %d, %Y")
 
-    system_prompt = """You are a serious, data-driven prediction market analyst advising a trader who wants niche, 
+    system_prompt = """You are a serious, data-driven prediction market analyst advising a trader who wants niche,
 under-the-radar markets — NOT mainstream geopolitical or sports headlines.
 
-The trader loves markets like: "Will credit card rates be capped in 2026?", "Will the FDA approve a 
-psychedelic substance for medical use?", "Will the Dietary Supplement Listing Act pass?" — 
+The trader loves markets like: "Will credit card rates be capped in 2026?", "Will the FDA approve a
+psychedelic substance for medical use?", "Will the Dietary Supplement Listing Act pass?" —
 regulatory, legislative, and corporate action markets that most traders ignore.
 
 When evaluating markets:
@@ -407,7 +409,7 @@ When evaluating markets:
     user_prompt = f"""Today is {today}.
 
 Below are {len(candidates)} active Kalshi markets sorted by volume (lowest first = most niche).
-Cross-reference these with your knowledge of current events and pick the top 6 that a serious trader 
+Cross-reference these with your knowledge of current events and pick the top 6 that a serious trader
 should research further.
 
 Markets:
