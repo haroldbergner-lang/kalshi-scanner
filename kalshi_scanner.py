@@ -281,6 +281,9 @@ def main() -> None:
     markets    = fetch_all_markets()
     candidates = prepare_for_claude(markets)
     print(f"Candidates after filtering: {len(candidates)}")
+    if candidates:
+        cats = set(m.get('category','') for m in markets)
+        print(f"All categories found: {sorted(cats)}")
     picks      = score_markets(candidates)
     if not picks:
         print("No picks returned — skipping email.")
