@@ -58,7 +58,7 @@ def fetch_all_markets() -> list[dict]:
     for page in range(20):
         sign_path = "/trade-api/v2/markets"
         headers = make_auth_headers("GET", sign_path)
-        params: dict = {"limit": 100, "status": "open"}
+        params: dict = {"limit": 100, "status": "open", "multivariate_events": "exclude"}
         if cursor:
             params["cursor"] = cursor
 
