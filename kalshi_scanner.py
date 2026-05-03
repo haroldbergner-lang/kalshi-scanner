@@ -1,42 +1,37 @@
 """
-Kalshi Morning Market Scanner
+Kalshi Morning Scanner — uses /events endpoint which auto-excludes combo/parlay markets.
+Sends each event (with all sub-markets) to Claude for edge scoring using the Alex framework.
 """
-
-import os
-import json
-import time
-import base64
-import smtplib
-import requests
-import datetime
-from email.mime.multipart import MIMEMultipart
+import os, json, time, base64, smtplib, random
+from datetime import datetime
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
-import anthropic
-
-KALSHI_API_KEY      = os.environ["KALSHI_API_KEY"]
-KALSHI_PRIVATE_KEY  = os.environ["KALSHI_PRIVATE_KEY"]
-ANTHROPIC_API_KEY   = os.environ["ANTHROPIC_API_KEY"]
-GMAIL_USER          = os.environ["GMAIL_USER"]
-GMAIL_APP_PASSWORD  = os.environ["GMAIL_APP_PASSWORD"]
-EMAIL_TO            = os.environ["EMAIL_TO"]
-
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+ANTHROPIC_BASE = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
-def get_private_key():
-    key = KALSHI_PRIVATE_KEY
-    if "\\n" in key:
-        key = key.replace("\\n", "\n")
-    return serialization.load_pem_private_key(key.encode(), password=None)
+KALSHI_KEY_ID = os.environ["KALSHI_API_KEY"]
+KALSHI_PRIVATE_KEY_PEM = os.environ["KALSHI_PRIVATE_KEY"]
+ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
+GMAIL_USER = os.environ["GMAIL_USER"]
+GMAIL_PASS = os.environ["GMAIL_APP_PASSWORD"]
+EMAIL_TO = os.environ["EMAIL_TO"]
 
-def make_auth_headers(method: str, path: str) -> dict:
-    timestamp = str(int(datetime.datetime.now().timestamp() * 1000))
-    message = f"{timestamp}{method}{path}".encode("utf-8")
-    private_key = get_private_key()
-    signature = private_key.sign(
-        message,
+_private_key = serialization.load_pem_private_key(
+    KALSHI_PRIVATE_KEY_PEM.encode(), password=None
+)
+
+
+def make_auth_headers(method, path):
+    timestamp = str(int(time.time() * 1000))
+    path_to_sign = path.split("?")[0]
+    msg = (timestamp + method + path_to_sign).encode()
+    signature = _private_key.sign(
+        msg,
         asym_padding.PSS(
             mgf=asym_padding.MGF1(hashes.SHA256()),
             salt_length=asym_padding.PSS.DIGEST_LENGTH,
@@ -44,279 +39,219 @@ def make_auth_headers(method: str, path: str) -> dict:
         hashes.SHA256(),
     )
     return {
-        "KALSHI-ACCESS-KEY": KALSHI_API_KEY,
+        "KALSHI-ACCESS-KEY": KALSHI_KEY_ID,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("utf-8"),
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
         "Content-Type": "application/json",
     }
 
-def fetch_all_markets() -> list[dict]:
-    markets: list[dict] = []
-    cursor: str | None = None
 
-    print("Fetching Kalshi markets...")
-    for page in range(20):
-        sign_path = "/trade-api/v2/markets"
-        headers = make_auth_headers("GET", sign_path)
-        params: dict = {"limit": 100, "status": "open", "multivariate_events": "exclude"}
+def fetch_open_events():
+    """Events endpoint auto-excludes multivariate combos. with_nested_markets gives us prices."""
+    events = []
+    cursor = None
+    print("Fetching Kalshi events (combos auto-excluded)...")
+    for page in range(15):
+        path = "/trade-api/v2/events"
+        headers = make_auth_headers("GET", path)
+        params = {"limit": 200, "status": "open", "with_nested_markets": "true"}
         if cursor:
             params["cursor"] = cursor
-
-        resp = requests.get(f"{KALSHI_BASE}/markets", headers=headers, params=params, timeout=30)
-        resp.raise_for_status()
-        body = resp.json()
-
-        batch = body.get("markets", [])
-        markets.extend(batch)
+        r = requests.get(f"{KALSHI_BASE}/events", headers=headers, params=params, timeout=30)
+        r.raise_for_status()
+        body = r.json()
+        batch = body.get("events", [])
+        events.extend(batch)
         cursor = body.get("cursor")
-        print(f"  Page {page + 1}: got {len(batch)} markets (total {len(markets)})")
+        print(f"  Page {page+1}: {len(batch)} events (total {len(events)})")
         if not cursor or not batch:
             break
+    print(f"Total open events: {len(events)}")
+    return events
 
-    print(f"Total open markets fetched: {len(markets)}")
-    return markets
 
-def prepare_for_claude(markets: list[dict]) -> list[dict]:
-    """
-    Filter out obvious sports parlays (titles starting with yes/no legs)
-    then take a stratified sample: some low volume, some mid volume.
-    This ensures Claude sees real regulatory/economic markets.
-    """
-    cleaned = []
-    for m in markets:
-        title = (m.get("title") or "").strip()
+def prepare_for_claude(events):
+    """Each event = one entry with title + all sub-markets formatted for analysis."""
+    formatted = []
+    for ev in events:
+        title = (ev.get("title") or "").strip()
         if not title:
             continue
-        # Debug first 5 titles
-        if len(cleaned) < 5:
-            print(f"RAW TITLE: {repr(title[:80])}")
-        # Skip parlay legs - these always start with "yes" or "no" followed by a space
-        if title.lower().startswith("yes ") or title.lower().startswith("no "):
+        markets = ev.get("markets", [])
+        if not markets:
             continue
-        cleaned.append({
-            "ticker":     m.get("ticker", ""),
-            "title":      title,
-            "subtitle":   (m.get("subtitle") or "").strip(),
-            "category":   m.get("category", ""),
-            "volume":     m.get("volume") or 0,
-            "yes_bid":    m.get("yes_bid") or 0,
-            "close_time": m.get("close_time", ""),
+        market_lines = []
+        total_vol = 0.0
+        for m in markets:
+            sub = (m.get("yes_sub_title") or m.get("title") or "").strip()
+            yes_bid = m.get("yes_bid_dollars") or "0"
+            vol = float(m.get("volume_fp") or 0)
+            total_vol += vol
+            market_lines.append(f"  - {sub}: yes ${yes_bid} (vol {int(vol)})")
+        formatted.append({
+            "event_ticker": ev.get("event_ticker", ""),
+            "title": title,
+            "category": (ev.get("category") or "").strip(),
+            "subtitle": (ev.get("sub_title") or "").strip(),
+            "markets_text": "\n".join(market_lines),
+            "n_markets": len(markets),
+            "total_volume": total_vol,
         })
-
-    cleaned.sort(key=lambda x: x["volume"])
-
-    # Take stratified sample: bottom third, middle third, top third
-    n = len(cleaned)
-    bottom = cleaned[:100]
-    middle = cleaned[n//3:n//3+100]
-    top = cleaned[-100:]
-
-    # Combine and deduplicate
-    seen = set()
-    sample = []
-    for m in bottom + middle + top:
-        if m["ticker"] not in seen:
-            seen.add(m["ticker"])
-            sample.append(m)
-
-    print(f"Candidates after filtering: {len(cleaned)} total, sending {len(sample)} sample")
-    print("Sample of titles being sent:")
-    for m in sample[:10]:
-        print(f"  [{m['volume']}] {m['title']}")
-
+    random.shuffle(formatted)
+    sample = formatted[:200]
+    print(f"Total events with markets: {len(formatted)}, sampling {len(sample)}")
+    print("Sample of events being analyzed:")
+    for ev in sample[:15]:
+        print(f"  [{ev['category']}] ({ev['n_markets']}m, vol {int(ev['total_volume'])}) {ev['title'][:80]}")
     return sample
 
-def score_markets(candidates: list[dict]) -> list[dict]:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    today = datetime.datetime.now().strftime("%A, %B %d, %Y")
 
-    system_prompt = """You are a sharp prediction market analyst. Your job is to find markets where the crowd 
-is mispricing something because they are thinking about the wrong thing.
+SYSTEM_PROMPT = """You are an expert prediction-market analyst evaluating Kalshi events for edge.
 
-The best markets to flag are ones where:
+You're hunting for mispriced markets using the Alex/Landtrader framework (Risk Takers Ep 149). There are FOUR edge types worth picking:
 
-1. HIDDEN CONSTRAINT EDGE: The market resolves on a specific technical condition that most 
-   traders are ignoring. Like a baseball game with a mercy rule — everyone prices it like a 
-   normal game but the actual resolution criteria changes everything.
+1. HIDDEN CONSTRAINT — market resolves on a technical/legal condition the crowd ignores. (Mercy rule kicks in. "Death of Ayatollah" doesn't count as "out of power" per the rules. Exact resolution wording.)
 
-2. BEHAVIORAL OBSERVATION EDGE: You can use simple real-world knowledge to price something 
-   the market hasn't accounted for. Like knowing a guy tweets at 10am so he definitely 
-   won't complete a challenge at 2am — the market priced all time windows equally.
+2. BEHAVIORAL OBSERVATION — public info the crowd hasn't priced. (Athlete tweets at 10am, so the 6-10hr bracket is impossible. Player has flu but it's only on local beat reporter Twitter.)
 
-3. NARRATIVE VS REALITY EDGE: The crowd is betting a story rather than the actual 
-   mechanics. Regulatory markets are full of this — people price "will X pass" based on 
-   political vibes when the real question is "does this specific bill have committee votes 
-   by a specific date."
+3. NARRATIVE vs REALITY — crowd prices the story, not the mechanics. (Dunk contest contestant priced at 15¢ because YouTube searches surfaced his more athletic brother.)
 
-4. UNDER-THE-RADAR LEGISLATIVE/REGULATORY: Markets about FDA actions, agency rulemakings, 
-   Congressional committee votes, FTC/DOJ decisions, economic data releases where you have 
-   real informational edge from following the news closely. NOT the obvious headline stuff 
-   like "who wins the election" but the second-order stuff like "will credit card rates be 
-   capped" or "will the FDA approve X."
+4. UNDER-THE-RADAR REGULATORY/LEGISLATIVE — niche policy and economic markets where domain knowledge gives edge. (FDA approvals, agency rulings, specific bills, monetary policy nuances.)
 
-NEVER pick:
-- Sports outcome markets (who wins a game, series, championship)
-- Player performance props
-- Entertainment awards
-- Anything where the title starts with "yes" or "no" (parlay legs)
-- Markets closing today with zero volume
+REJECT these aggressively:
+- Generic "Team X wins game" sports markets (no edge unless a specific hidden constraint applies)
+- Markets where the price clearly already reflects the obvious answer
+- Award/season-long markets with no near-term resolution
+- Anything where you can't articulate WHY the crowd is wrong
 
-Return 4-6 picks. If you cannot find 4 qualifying markets, return fewer rather than 
-inventing picks or lowering your standards."""
+Be ruthless. Most events will not have edge — that's fine. Score 7+ only if you can articulate genuine mispricing.
 
-    user_prompt = f"""Today is {today}.
+Return ONLY a JSON array. Each pick:
+{
+  "event_ticker": "...",
+  "score": 7-10,
+  "edge_type": "hidden_constraint" | "behavioral" | "narrative_vs_reality" | "regulatory",
+  "thesis": "2-3 sentences explaining what the crowd is missing",
+  "best_market": "which sub-market and direction (yes/no)"
+}
 
-Here are {len(candidates)} Kalshi markets. Find the ones with genuine edge using the 
-framework above — hidden constraints, behavioral observations, narrative vs reality gaps, 
-or under-the-radar regulatory/legislative markets.
+If nothing meets the bar, return []. Quality over quantity. Aim for 3-7 picks max."""
 
-{json.dumps(candidates, indent=2, default=str)}
 
-Return a raw JSON array only — no markdown, no explanation. Each object:
-{{
-  "ticker": "ticker",
-  "title": "title",
-  "score": 7,
-  "reasoning": "2-3 sentences explaining exactly what the crowd is missing and why you have edge",
-  "edge_type": "Hidden Constraint | Behavioral | Narrative vs Reality | Legislative | Regulatory | Economic | Corporate",
-  "yes_bid": 45,
-  "volume": 1234,
-  "news_hook": "4-6 word hook",
-  "close_time": "ISO date or empty"
-}}"""
-
-    print("Sending to Claude for analysis...")
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
+def score_with_claude(events):
+    blocks = []
+    for ev in events:
+        blocks.append(
+            f"=== {ev['event_ticker']} ===\n"
+            f"Title: {ev['title']}\n"
+            f"Category: {ev['category']}\n"
+            f"Subtitle: {ev['subtitle']}\n"
+            f"Total volume: {int(ev['total_volume'])}\n"
+            f"Markets:\n{ev['markets_text']}"
+        )
+    user_msg = (
+        f"Today is {datetime.utcnow().strftime('%Y-%m-%d')}.\n\n"
+        "Evaluate these Kalshi events for edge using the four-edge framework. "
+        "Be selective — most won't qualify.\n\n"
+        "EVENTS:\n\n" + "\n\n".join(blocks) +
+        "\n\nReturn your picks as a JSON array only. No prose before or after."
     )
-    raw = response.content[0].text.strip()
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    start = raw.find("[")
-    end = raw.rfind("]") + 1
-    if start == -1 or end == 0:
-        print(f"Warning: Claude didn't return valid JSON. Raw: {raw[:300]}")
+    print("Sending to Claude...")
+    r = requests.post(
+        ANTHROPIC_BASE,
+        headers={
+            "x-api-key": ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": 4096,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_msg}],
+        },
+        timeout=180,
+    )
+    r.raise_for_status()
+    text = r.json()["content"][0]["text"].strip()
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        print(f"No JSON array in response. First 500 chars: {text[:500]}")
         return []
-    picks = json.loads(raw[start:end])
-    print(f"Claude returned {len(picks)} picks")
-    return picks
-
-def build_email(picks: list[dict]) -> str:
-    today_str = datetime.datetime.now().strftime("%A, %B %d, %Y")
-
-    def score_color(s):
-        if s >= 8: return "#15803d"
-        if s >= 6: return "#b45309"
-        return "#6b7280"
-
-    def badge(s):
-        if s >= 8: return "Strong signal"
-        if s >= 6: return "Worth a look"
-        return "Moderate"
-
-    def badge_bg(s):
-        if s >= 8: return "#dcfce7"
-        if s >= 6: return "#fef3c7"
-        return "#f3f4f6"
-
-    def fmt_close(close_time):
-        if not close_time: return "—"
-        try:
-            dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-            return dt.strftime("%b %d, %Y")
-        except Exception:
-            return close_time[:10] if len(close_time) >= 10 else close_time
-
-    cards = ""
+    try:
+        picks = json.loads(text[start:end+1])
+    except json.JSONDecodeError as e:
+        print(f"JSON parse failed: {e}")
+        return []
+    by_ticker = {ev["event_ticker"]: ev for ev in events}
+    enriched = []
     for p in picks:
-        score   = int(p.get("score", 5))
-        yes_bid = int(p.get("yes_bid", 50))
-        volume  = int(p.get("volume", 0))
-        ticker  = p.get("ticker", "")
-        close   = fmt_close(p.get("close_time", ""))
-        cards += f"""
-        <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:20px;margin-bottom:16px;">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:12px;">
-            <p style="font-size:15px;font-weight:600;color:#111827;margin:0;flex:1;line-height:1.4;">{p.get("title","")}</p>
-            <div style="text-align:right;flex-shrink:0;">
-              <span style="font-size:22px;font-weight:700;color:{score_color(score)};">{score}/10</span><br>
-              <span style="display:inline-block;font-size:11px;font-weight:600;color:{score_color(score)};
-                           background:{badge_bg(score)};padding:2px 8px;border-radius:6px;margin-top:2px;">{badge(score)}</span>
-            </div>
-          </div>
-          <p style="font-size:13px;color:#6b7280;line-height:1.6;margin:0 0 14px;">{p.get("reasoning","")}</p>
-          <div style="border-top:1px solid #f3f4f6;padding-top:10px;">
-            <table style="width:100%;border-collapse:collapse;font-size:12px;">
-              <tr>
-                <td style="color:#9ca3af;padding:3px 0;">Edge type</td>
-                <td style="color:#374151;font-weight:600;text-align:right;">{p.get("edge_type","—")}</td>
-                <td style="width:20px;"></td>
-                <td style="color:#9ca3af;padding:3px 0;">Yes price</td>
-                <td style="color:#374151;font-weight:600;text-align:right;">{yes_bid}¢</td>
-              </tr>
-              <tr>
-                <td style="color:#9ca3af;padding:3px 0;">Volume</td>
-                <td style="color:#374151;font-weight:600;text-align:right;">${volume:,}</td>
-                <td></td>
-                <td style="color:#9ca3af;padding:3px 0;">Closes</td>
-                <td style="color:#374151;font-weight:600;text-align:right;">{close}</td>
-              </tr>
-              <tr>
-                <td style="color:#9ca3af;padding:3px 0;">News hook</td>
-                <td colspan="4" style="color:#374151;font-weight:600;text-align:right;">{p.get("news_hook","—")}</td>
-              </tr>
-            </table>
-            <div style="margin-top:12px;">
-              <a href="https://kalshi.com/markets/{ticker}"
-                 style="display:inline-block;font-size:13px;color:#2563eb;text-decoration:none;
-                        border:1px solid #bfdbfe;border-radius:8px;padding:6px 14px;">
-                View on Kalshi →
-              </a>
-            </div>
-          </div>
-        </div>"""
+        t = p.get("event_ticker", "")
+        if t in by_ticker:
+            p["_event"] = by_ticker[t]
+            enriched.append(p)
+    print(f"Claude returned {len(enriched)} picks")
+    return enriched
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <div style="max-width:620px;margin:0 auto;padding:32px 16px;">
-    <div style="margin-bottom:28px;">
-      <h1 style="font-size:26px;font-weight:700;color:#111827;margin:0 0 4px;">Kalshi Market Scanner</h1>
-      <p style="font-size:14px;color:#9ca3af;margin:0;">{today_str} · Edge-based market picks</p>
-    </div>
-    {cards}
-    <p style="font-size:11px;color:#d1d5db;text-align:center;margin-top:24px;line-height:1.6;">
-      Powered by Claude + Kalshi API · Not financial advice · Do your own research before trading
-    </p>
-  </div>
-</body>
-</html>"""
 
-def send_email(html: str, pick_count: int) -> None:
-    subject = f"Kalshi Scan · {pick_count} picks · {datetime.datetime.now().strftime('%b %d')}"
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = GMAIL_USER
-    msg["To"]      = EMAIL_TO
-    msg.attach(MIMEText(html, "html", "utf-8"))
-    print(f"Sending email to {EMAIL_TO}...")
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
-    print("Email sent!")
-
-def main() -> None:
-    markets    = fetch_all_markets()
-    candidates = prepare_for_claude(markets)
-    picks      = score_markets(candidates)
+def format_email_html(picks):
     if not picks:
-        print("No picks returned — skipping email.")
+        return "<html><body><p>No picks today — nothing met the edge bar.</p></body></html>"
+    rows = []
+    for p in picks:
+        ev = p.get("_event", {})
+        score = p.get("score", 0)
+        color = "#22c55e" if score >= 8 else "#eab308"
+        edge_label = p.get("edge_type", "").replace("_", " ").upper()
+        ticker = ev.get("event_ticker", "").lower()
+        rows.append(f'''
+<div style="border:1px solid #e2e8f0; border-radius:10px; padding:18px; margin-bottom:14px; background:white;">
+  <div style="display:flex; justify-content:space-between; gap:12px;">
+    <div style="flex:1;">
+      <div style="font-size:11px; color:#64748b; letter-spacing:0.05em; font-weight:600;">{ev.get('category','')} · {edge_label}</div>
+      <div style="font-size:16px; font-weight:600; margin-top:4px; color:#0f172a;">{ev.get('title','')}</div>
+    </div>
+    <div style="background:{color}; color:white; font-weight:700; padding:6px 12px; border-radius:8px; font-size:14px; height:fit-content;">{score}/10</div>
+  </div>
+  <div style="margin-top:12px; color:#334155; font-size:14px; line-height:1.55;">{p.get('thesis','')}</div>
+  <div style="margin-top:12px; padding:10px 12px; background:#f1f5f9; border-radius:6px; font-size:13px; color:#475569;">
+    <strong style="color:#0f172a;">Trade idea:</strong> {p.get('best_market','')}
+  </div>
+  <div style="margin-top:10px; font-size:12px;">
+    <a href="https://kalshi.com/markets/{ticker}" style="color:#3b82f6; text-decoration:none;">Open on Kalshi →</a>
+  </div>
+</div>''')
+    return f'''<html><body style="font-family:-apple-system,Segoe UI,sans-serif; background:#f8fafc; max-width:640px; margin:0 auto; padding:24px;">
+<h1 style="font-size:22px; margin:0 0 4px 0; color:#0f172a;">Kalshi Morning Scan</h1>
+<p style="color:#64748b; margin:0 0 20px 0; font-size:14px;">{datetime.utcnow().strftime('%A, %B %d, %Y')} · {len(picks)} picks</p>
+{''.join(rows)}
+</body></html>'''
+
+
+def send_email(picks):
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Kalshi Scan · {len(picks)} picks · {datetime.utcnow().strftime('%b %d')}"
+    msg["From"] = GMAIL_USER
+    msg["To"] = EMAIL_TO
+    msg.attach(MIMEText(format_email_html(picks), "html"))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(GMAIL_USER, GMAIL_PASS)
+        s.send_message(msg)
+    print(f"Sent email with {len(picks)} picks to {EMAIL_TO}")
+
+
+def main():
+    events = fetch_open_events()
+    sample = prepare_for_claude(events)
+    if not sample:
+        print("No events to analyze")
         return
-    html = build_email(picks)
-    send_email(html, len(picks))
+    picks = score_with_claude(sample)
+    if not picks:
+        print("No picks — skipping email")
+        return
+    send_email(picks)
+
 
 if __name__ == "__main__":
     main()
