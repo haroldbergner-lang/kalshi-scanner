@@ -26,7 +26,11 @@ EMAIL_TO            = os.environ["EMAIL_TO"]
 KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2"
 
 def get_private_key():
-    return serialization.load_pem_private_key(KALSHI_PRIVATE_KEY.encode(), password=None)
+    # GitHub secrets sometimes strip newlines — restore them
+    key = KALSHI_PRIVATE_KEY
+    if "\\n" in key:
+        key = key.replace("\\n", "\n")
+    return serialization.load_pem_private_key(key.encode(), password=None)
 
 def make_auth_headers(method: str, path: str) -> dict:
     timestamp = str(int(datetime.datetime.now().timestamp() * 1000))
@@ -52,6 +56,9 @@ def fetch_all_markets() -> list[dict]:
     cursor: str | None = None
 
     print("Fetching Kalshi markets...")
+    print(f"API Key ID: {KALSHI_API_KEY[:8]}...")
+    print(f"Private key starts with: {KALSHI_PRIVATE_KEY[:30]!r}")
+
     for page in range(20):
         sign_path = "/trade-api/v2/markets"
         headers = make_auth_headers("GET", sign_path)
@@ -60,6 +67,9 @@ def fetch_all_markets() -> list[dict]:
             params["cursor"] = cursor
 
         resp = requests.get(f"{KALSHI_BASE}/markets", headers=headers, params=params, timeout=30)
+        print(f"Response status: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"Response body: {resp.text[:500]}")
         resp.raise_for_status()
         body = resp.json()
 
