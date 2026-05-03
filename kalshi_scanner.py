@@ -102,6 +102,7 @@ def prepare_for_claude(markets: list[dict]) -> list[dict]:
             continue
             
         # Skip obvious parlay titles (start with "yes" or "no")
+        title_lower = title.lower()
         if title_lower.startswith("yes ") or title_lower.startswith("no "):
             continue
 
