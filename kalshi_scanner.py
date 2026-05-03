@@ -143,7 +143,7 @@ Return ONLY a raw JSON array — no markdown, no backticks, no explanation. Each
   "close_time": "ISO date string or empty"
 }}
 
-Only include markets scoring 6 or above. Be selective — 4 great picks beats 8 mediocre ones."""
+Return your top 6 picks regardless of score. Every scan should return at least 4-6 markets."""
 
     print("Sending to Claude for analysis...")
     response = client.messages.create(
