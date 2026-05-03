@@ -26,7 +26,6 @@ EMAIL_TO            = os.environ["EMAIL_TO"]
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 def get_private_key():
-    # GitHub secrets sometimes strip newlines — restore them
     key = KALSHI_PRIVATE_KEY
     if "\\n" in key:
         key = key.replace("\\n", "\n")
@@ -56,9 +55,6 @@ def fetch_all_markets() -> list[dict]:
     cursor: str | None = None
 
     print("Fetching Kalshi markets...")
-    print(f"API Key ID: {KALSHI_API_KEY[:8]}...")
-    print(f"Private key starts with: {KALSHI_PRIVATE_KEY[:30]!r}")
-
     for page in range(20):
         sign_path = "/trade-api/v2/markets"
         headers = make_auth_headers("GET", sign_path)
@@ -67,9 +63,6 @@ def fetch_all_markets() -> list[dict]:
             params["cursor"] = cursor
 
         resp = requests.get(f"{KALSHI_BASE}/markets", headers=headers, params=params, timeout=30)
-        print(f"Response status: {resp.status_code}")
-        if resp.status_code != 200:
-            print(f"Response body: {resp.text[:500]}")
         resp.raise_for_status()
         body = resp.json()
 
@@ -90,8 +83,21 @@ def prepare_for_claude(markets: list[dict]) -> list[dict]:
         yes_bid = m.get("yes_bid") or 0
         title = (m.get("title") or "").strip()
         subtitle = (m.get("subtitle") or "").strip()
+        category = (m.get("category") or "").lower()
+
         if not title:
             continue
+
+        # Filter out sports and entertainment categories before sending to Claude
+        skip_keywords = ["nba", "nfl", "nhl", "mlb", "nascar", "golf", "mma", "ufc",
+                         "boxing", "soccer", "tennis", "parlay", "oscar", "emmy",
+                         "grammy", "celebrity", "reality tv"]
+        title_lower = title.lower()
+        if any(kw in title_lower for kw in skip_keywords):
+            continue
+        if any(kw in category for kw in ["sports", "entertainment", "pop culture"]):
+            continue
+
         cleaned.append({
             "ticker":    m.get("ticker", ""),
             "title":     title,
@@ -101,6 +107,7 @@ def prepare_for_claude(markets: list[dict]) -> list[dict]:
             "yes_bid":   yes_bid,
             "close_time": m.get("close_time", ""),
         })
+
     cleaned.sort(key=lambda x: x["volume"])
     return cleaned[:300]
 
@@ -108,42 +115,35 @@ def score_markets(candidates: list[dict]) -> list[dict]:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     today = datetime.datetime.now().strftime("%A, %B %d, %Y")
 
-    system_prompt = """You are a serious, data-driven prediction market analyst advising a trader who wants niche,
-under-the-radar markets — NOT mainstream geopolitical or sports headlines.
+    system_prompt = """You are a prediction market analyst. Your job is to identify the 6 most interesting
+non-sports, non-entertainment Kalshi markets for a trader focused on regulatory, legislative,
+economic, and corporate events.
 
-The trader loves markets like: "Will credit card rates be capped in 2026?", "Will the FDA approve a
-psychedelic substance for medical use?", "Will the Dietary Supplement Listing Act pass?" —
-regulatory, legislative, and corporate action markets that most traders ignore.
-
-When evaluating markets:
-- Prioritize low-volume markets (less efficient pricing = more edge)
-- Look for markets where your knowledge of current events creates real informational edge
-- Avoid sports, elections, and markets everyone is already watching
-- Focus on legislative timelines, FDA actions, agency rulemakings, corporate events, economic data releases"""
+You MUST always return exactly 6 picks. Never return an empty list."""
 
     user_prompt = f"""Today is {today}.
 
-Below are {len(candidates)} active Kalshi markets sorted by volume (lowest first = most niche).
-Cross-reference these with your knowledge of current events and pick the top 6 that a serious trader
-should research further.
+Here are {len(candidates)} active Kalshi markets (sports and entertainment already filtered out).
+Pick the 6 most interesting for a trader who wants edge in regulatory, legislative, FDA, 
+economic data, or corporate action markets.
 
 Markets:
 {json.dumps(candidates, indent=2, default=str)}
 
-Return ONLY a raw JSON array — no markdown, no backticks, no explanation. Each object:
+You MUST return a JSON array with EXACTLY 6 items. No markdown, no backticks, just raw JSON.
+
+Each object must have:
 {{
-  "ticker": "market ticker string",
+  "ticker": "ticker string",
   "title": "market title",
-  "score": 8,
-  "reasoning": "2-3 sentences on why this has edge given current news/events",
+  "score": 7,
+  "reasoning": "2-3 sentences on why this is interesting",
   "edge_type": "Legislative | Regulatory | Corporate | Economic | Other",
   "yes_bid": 45,
-  "volume": 12345,
-  "news_hook": "4-6 word news signal",
-  "close_time": "ISO date string or empty"
-}}
-
-Return your top 6 picks. Every scan must return at least 4-6 markets. NEVER pick sports parlays, MMA cards, golf parlays, or NBA parlays. ONLY pick legislative, regulatory, FDA, corporate, or economic markets."""
+  "volume": 1234,
+  "news_hook": "4-6 word hook",
+  "close_time": "ISO date or empty string"
+}}"""
 
     print("Sending to Claude for analysis...")
     response = client.messages.create(
@@ -158,6 +158,7 @@ Return your top 6 picks. Every scan must return at least 4-6 markets. NEVER pick
     end = raw.rfind("]") + 1
     if start == -1 or end == 0:
         print("Warning: Claude didn't return a valid JSON array")
+        print(f"Raw response: {raw[:500]}")
         return []
     picks = json.loads(raw[start:end])
     print(f"Claude returned {len(picks)} picks")
@@ -271,6 +272,7 @@ def send_email(html: str, pick_count: int) -> None:
 def main() -> None:
     markets    = fetch_all_markets()
     candidates = prepare_for_claude(markets)
+    print(f"Candidates after filtering: {len(candidates)}")
     picks      = score_markets(candidates)
     if not picks:
         print("No picks returned — skipping email.")
