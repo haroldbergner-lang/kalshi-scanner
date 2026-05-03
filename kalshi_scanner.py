@@ -78,14 +78,17 @@ def fetch_all_markets() -> list[dict]:
 
 def prepare_for_claude(markets: list[dict]) -> list[dict]:
     """
-    Minimal filtering — just remove markets with no title.
-    Sort by volume ascending so lowest volume (most niche) comes first.
-    Take the 300 lowest volume markets.
+    Filter out obvious sports parlays (titles starting with yes/no legs)
+    then take a stratified sample: some low volume, some mid volume.
+    This ensures Claude sees real regulatory/economic markets.
     """
     cleaned = []
     for m in markets:
         title = (m.get("title") or "").strip()
         if not title:
+            continue
+        # Skip parlay legs - these always start with "yes" or "no" followed by a space
+        if title.lower().startswith("yes ") or title.lower().startswith("no "):
             continue
         cleaned.append({
             "ticker":     m.get("ticker", ""),
@@ -98,47 +101,71 @@ def prepare_for_claude(markets: list[dict]) -> list[dict]:
         })
 
     cleaned.sort(key=lambda x: x["volume"])
-    print(f"Candidates after filtering: {len(cleaned)}")
 
-    # Show category breakdown for debugging
-    from collections import Counter
-    cats = Counter(m["category"] for m in cleaned[:300])
-    print(f"Top categories in candidate set: {cats.most_common(10)}")
-    print("Sample titles:")
-    for m in cleaned[:20]:
+    # Take stratified sample: bottom third, middle third, top third
+    n = len(cleaned)
+    bottom = cleaned[:100]
+    middle = cleaned[n//3:n//3+100]
+    top = cleaned[-100:]
+
+    # Combine and deduplicate
+    seen = set()
+    sample = []
+    for m in bottom + middle + top:
+        if m["ticker"] not in seen:
+            seen.add(m["ticker"])
+            sample.append(m)
+
+    print(f"Candidates after filtering: {len(cleaned)} total, sending {len(sample)} sample")
+    print("Sample of titles being sent:")
+    for m in sample[:10]:
         print(f"  [{m['volume']}] {m['title']}")
 
-    return cleaned[:300]
+    return sample
 
 def score_markets(candidates: list[dict]) -> list[dict]:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     today = datetime.datetime.now().strftime("%A, %B %d, %Y")
 
-    system_prompt = """You are a prediction market analyst helping a trader find edge in niche markets.
+    system_prompt = """You are a sharp prediction market analyst. Your job is to find markets where the crowd 
+is mispricing something because they are thinking about the wrong thing.
 
-WHAT TO PICK — markets about:
-- Legislative events (bills passing, votes, reconciliation)
-- Regulatory actions (FDA approvals, FTC/DOJ rulings, SEC actions, agency rulemakings)
-- Economic data releases (CPI, jobs report, Fed rate decisions, GDP)
-- Corporate events (mergers, acquisitions, earnings surprises, CEO changes)
-- Crypto regulatory or price milestones
-- Geopolitical events with clear resolution criteria
+The best markets to flag are ones where:
 
-WHAT TO IGNORE — do not pick:
-- Sports outcomes (NBA, NFL, MLB, NHL, MMA, golf, soccer, tennis)
-- Sports parlays or player prop bets
-- Entertainment awards (Oscars, Grammys, Emmys)
-- Celebrity or reality TV markets
-- Any market whose title starts with "yes" or "no" (these are parlay legs)
-- Markets closing today with zero volume (no time to trade)
+1. HIDDEN CONSTRAINT EDGE: The market resolves on a specific technical condition that most 
+   traders are ignoring. Like a baseball game with a mercy rule — everyone prices it like a 
+   normal game but the actual resolution criteria changes everything.
 
-Return between 4 and 8 picks. If fewer than 4 qualifying markets exist, return what you find.
-Never return placeholder or fake markets."""
+2. BEHAVIORAL OBSERVATION EDGE: You can use simple real-world knowledge to price something 
+   the market hasn't accounted for. Like knowing a guy tweets at 10am so he definitely 
+   won't complete a challenge at 2am — the market priced all time windows equally.
+
+3. NARRATIVE VS REALITY EDGE: The crowd is betting a story rather than the actual 
+   mechanics. Regulatory markets are full of this — people price "will X pass" based on 
+   political vibes when the real question is "does this specific bill have committee votes 
+   by a specific date."
+
+4. UNDER-THE-RADAR LEGISLATIVE/REGULATORY: Markets about FDA actions, agency rulemakings, 
+   Congressional committee votes, FTC/DOJ decisions, economic data releases where you have 
+   real informational edge from following the news closely. NOT the obvious headline stuff 
+   like "who wins the election" but the second-order stuff like "will credit card rates be 
+   capped" or "will the FDA approve X."
+
+NEVER pick:
+- Sports outcome markets (who wins a game, series, championship)
+- Player performance props
+- Entertainment awards
+- Anything where the title starts with "yes" or "no" (parlay legs)
+- Markets closing today with zero volume
+
+Return 4-6 picks. If you cannot find 4 qualifying markets, return fewer rather than 
+inventing picks or lowering your standards."""
 
     user_prompt = f"""Today is {today}.
 
-Here are {len(candidates)} Kalshi markets sorted by volume (lowest = most niche). 
-Identify the best legislative, regulatory, economic, and corporate markets.
+Here are {len(candidates)} Kalshi markets. Find the ones with genuine edge using the 
+framework above — hidden constraints, behavioral observations, narrative vs reality gaps, 
+or under-the-radar regulatory/legislative markets.
 
 {json.dumps(candidates, indent=2, default=str)}
 
@@ -147,8 +174,8 @@ Return a raw JSON array only — no markdown, no explanation. Each object:
   "ticker": "ticker",
   "title": "title",
   "score": 7,
-  "reasoning": "2-3 sentences on why this has edge",
-  "edge_type": "Legislative | Regulatory | Corporate | Economic | Crypto | Other",
+  "reasoning": "2-3 sentences explaining exactly what the crowd is missing and why you have edge",
+  "edge_type": "Hidden Constraint | Behavioral | Narrative vs Reality | Legislative | Regulatory | Economic | Corporate",
   "yes_bid": 45,
   "volume": 1234,
   "news_hook": "4-6 word hook",
@@ -220,7 +247,7 @@ def build_email(picks: list[dict]) -> str:
           <div style="border-top:1px solid #f3f4f6;padding-top:10px;">
             <table style="width:100%;border-collapse:collapse;font-size:12px;">
               <tr>
-                <td style="color:#9ca3af;padding:3px 0;">Type</td>
+                <td style="color:#9ca3af;padding:3px 0;">Edge type</td>
                 <td style="color:#374151;font-weight:600;text-align:right;">{p.get("edge_type","—")}</td>
                 <td style="width:20px;"></td>
                 <td style="color:#9ca3af;padding:3px 0;">Yes price</td>
@@ -255,7 +282,7 @@ def build_email(picks: list[dict]) -> str:
   <div style="max-width:620px;margin:0 auto;padding:32px 16px;">
     <div style="margin-bottom:28px;">
       <h1 style="font-size:26px;font-weight:700;color:#111827;margin:0 0 4px;">Kalshi Market Scanner</h1>
-      <p style="font-size:14px;color:#9ca3af;margin:0;">{today_str} · Niche legislative &amp; regulatory picks</p>
+      <p style="font-size:14px;color:#9ca3af;margin:0;">{today_str} · Edge-based market picks</p>
     </div>
     {cards}
     <p style="font-size:11px;color:#d1d5db;text-align:center;margin-top:24px;line-height:1.6;">
@@ -266,7 +293,7 @@ def build_email(picks: list[dict]) -> str:
 </html>"""
 
 def send_email(html: str, pick_count: int) -> None:
-    subject = f"Kalshi Scan · {pick_count} niche picks · {datetime.datetime.now().strftime('%b %d')}"
+    subject = f"Kalshi Scan · {pick_count} picks · {datetime.datetime.now().strftime('%b %d')}"
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = GMAIL_USER
