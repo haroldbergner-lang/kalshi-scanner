@@ -77,80 +77,79 @@ def fetch_all_markets() -> list[dict]:
     return markets
 
 def prepare_for_claude(markets: list[dict]) -> list[dict]:
+    """
+    Minimal filtering — just remove markets with no title.
+    Sort by volume ascending so lowest volume (most niche) comes first.
+    Take the 300 lowest volume markets.
+    """
     cleaned = []
     for m in markets:
-        volume = m.get("volume") or 0
-        yes_bid = m.get("yes_bid") or 0
         title = (m.get("title") or "").strip()
-        subtitle = (m.get("subtitle") or "").strip()
-        category = (m.get("category") or "").lower()
-
         if not title:
             continue
-
-        # Filter out sports and entertainment categories before sending to Claude
-        # Only keep markets in useful categories
-        good_categories = ["politics", "economics", "financials", "crypto", "climate",
-                           "health", "science", "technology", "law", "regulation",
-                           "business", "federal reserve", "congress", "policy"]
-        category_lower = category.lower()
-        
-        # Skip if category is clearly sports or entertainment
-        bad_categories = ["sports", "entertainment", "pop culture", "awards", "nba",
-                          "nfl", "nhl", "mlb", "soccer", "golf", "tennis", "mma"]
-        if any(bc in category_lower for bc in bad_categories):
-            continue
-            
-        # Skip obvious parlay titles (start with "yes" or "no")
-        title_lower = title.lower()
-        if title_lower.startswith("yes ") or title_lower.startswith("no "):
-            continue
-
         cleaned.append({
-            "ticker":    m.get("ticker", ""),
-            "title":     title,
-            "subtitle":  subtitle,
-            "category":  m.get("category", ""),
-            "volume":    volume,
-            "yes_bid":   yes_bid,
+            "ticker":     m.get("ticker", ""),
+            "title":      title,
+            "subtitle":   (m.get("subtitle") or "").strip(),
+            "category":   m.get("category", ""),
+            "volume":     m.get("volume") or 0,
+            "yes_bid":    m.get("yes_bid") or 0,
             "close_time": m.get("close_time", ""),
         })
 
     cleaned.sort(key=lambda x: x["volume"])
+    print(f"Candidates after filtering: {len(cleaned)}")
+
+    # Show category breakdown for debugging
+    from collections import Counter
+    cats = Counter(m["category"] for m in cleaned[:300])
+    print(f"Top categories in candidate set: {cats.most_common(10)}")
+
     return cleaned[:300]
 
 def score_markets(candidates: list[dict]) -> list[dict]:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     today = datetime.datetime.now().strftime("%A, %B %d, %Y")
 
-    system_prompt = """You are a prediction market analyst. Your job is to identify the 6 most interesting
-non-sports, non-entertainment Kalshi markets for a trader focused on regulatory, legislative,
-economic, and corporate events.
+    system_prompt = """You are a prediction market analyst helping a trader find edge in niche markets.
 
-You MUST always return exactly 6 picks. Never return an empty list."""
+WHAT TO PICK — markets about:
+- Legislative events (bills passing, votes, reconciliation)
+- Regulatory actions (FDA approvals, FTC/DOJ rulings, SEC actions, agency rulemakings)
+- Economic data releases (CPI, jobs report, Fed rate decisions, GDP)
+- Corporate events (mergers, acquisitions, earnings surprises, CEO changes)
+- Crypto regulatory or price milestones
+- Geopolitical events with clear resolution criteria
+
+WHAT TO IGNORE — do not pick:
+- Sports outcomes (NBA, NFL, MLB, NHL, MMA, golf, soccer, tennis)
+- Sports parlays or player prop bets
+- Entertainment awards (Oscars, Grammys, Emmys)
+- Celebrity or reality TV markets
+- Any market whose title starts with "yes" or "no" (these are parlay legs)
+- Markets closing today with zero volume (no time to trade)
+
+Return between 4 and 8 picks. If fewer than 4 qualifying markets exist, return what you find.
+Never return placeholder or fake markets."""
 
     user_prompt = f"""Today is {today}.
 
-Here are {len(candidates)} active Kalshi markets (sports and entertainment already filtered out).
-Pick the 6 most interesting for a trader who wants edge in regulatory, legislative, FDA, 
-economic data, or corporate action markets.
+Here are {len(candidates)} Kalshi markets sorted by volume (lowest = most niche). 
+Identify the best legislative, regulatory, economic, and corporate markets.
 
-Markets:
 {json.dumps(candidates, indent=2, default=str)}
 
-You MUST return a JSON array with EXACTLY 6 items. No markdown, no backticks, just raw JSON.
-
-Each object must have:
+Return a raw JSON array only — no markdown, no explanation. Each object:
 {{
-  "ticker": "ticker string",
-  "title": "market title",
+  "ticker": "ticker",
+  "title": "title",
   "score": 7,
-  "reasoning": "2-3 sentences on why this is interesting",
-  "edge_type": "Legislative | Regulatory | Corporate | Economic | Other",
+  "reasoning": "2-3 sentences on why this has edge",
+  "edge_type": "Legislative | Regulatory | Corporate | Economic | Crypto | Other",
   "yes_bid": 45,
   "volume": 1234,
   "news_hook": "4-6 word hook",
-  "close_time": "ISO date or empty string"
+  "close_time": "ISO date or empty"
 }}"""
 
     print("Sending to Claude for analysis...")
@@ -165,8 +164,7 @@ Each object must have:
     start = raw.find("[")
     end = raw.rfind("]") + 1
     if start == -1 or end == 0:
-        print("Warning: Claude didn't return a valid JSON array")
-        print(f"Raw response: {raw[:500]}")
+        print(f"Warning: Claude didn't return valid JSON. Raw: {raw[:300]}")
         return []
     picks = json.loads(raw[start:end])
     print(f"Claude returned {len(picks)} picks")
@@ -280,10 +278,6 @@ def send_email(html: str, pick_count: int) -> None:
 def main() -> None:
     markets    = fetch_all_markets()
     candidates = prepare_for_claude(markets)
-    print(f"Candidates after filtering: {len(candidates)}")
-    if candidates:
-        cats = set(m.get('category','') for m in markets)
-        print(f"All categories found: {sorted(cats)}")
     picks      = score_markets(candidates)
     if not picks:
         print("No picks returned — skipping email.")
