@@ -1,59 +1,93 @@
 """
-Kalshi Morning Scanner — uses /events endpoint which auto-excludes combo/parlay markets.
-Sends each event (with all sub-markets) to Claude for edge scoring using the Alex framework.
+Kalshi Morning Market Scanner v3
+- Fetches series catalog (public) for category/frequency/tags metadata
+- Fetches events (auto-excludes combo/parlay markets)
+- Hard-filters by category + frequency
+- Sends ALL surviving event titles to Claude for curation
+- Claude picks 10-15 interesting markets for a morning digest email
 """
-import os, json, time, base64, smtplib, random
-from datetime import datetime
+
+import os, json, time, base64, smtplib, datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
-KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-ANTHROPIC_BASE = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
+# ── Config ────────────────────────────────────────────────────────────────────
+KALSHI_BASE        = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_KEY_ID      = os.environ["KALSHI_API_KEY"]
+KALSHI_PRIVATE_KEY = os.environ["KALSHI_PRIVATE_KEY"]
+ANTHROPIC_KEY      = os.environ["ANTHROPIC_API_KEY"].strip()
+GMAIL_USER         = os.environ["GMAIL_USER"]
+GMAIL_PASS         = os.environ["GMAIL_APP_PASSWORD"]
+EMAIL_TO           = os.environ["EMAIL_TO"]
 
-KALSHI_KEY_ID = os.environ["KALSHI_API_KEY"]
-KALSHI_PRIVATE_KEY_PEM = os.environ["KALSHI_PRIVATE_KEY"]
-ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
-GMAIL_USER = os.environ["GMAIL_USER"]
-GMAIL_PASS = os.environ["GMAIL_APP_PASSWORD"]
-EMAIL_TO = os.environ["EMAIL_TO"]
+# Hard-drop these categories entirely
+DROP_CATEGORIES = {"Mentions", "Exotics", "Social"}
 
-_private_key = serialization.load_pem_private_key(
-    KALSHI_PRIVATE_KEY_PEM.encode(), password=None
-)
+# Hard-drop these frequencies
+DROP_FREQUENCIES_ALL = {"daily"}  # drops daily across ALL categories
 
+# Drop weekly ONLY for Entertainment (Billboard, Netflix rankings, etc.)
+DROP_WEEKLY_FOR = {"Entertainment"}
 
-def make_auth_headers(method, path):
-    timestamp = str(int(time.time() * 1000))
-    path_to_sign = path.split("?")[0]
-    msg = (timestamp + method + path_to_sign).encode()
-    signature = _private_key.sign(
+_pk = None
+def _get_private_key():
+    global _pk
+    if _pk is None:
+        key = KALSHI_PRIVATE_KEY
+        if "\\n" in key:
+            key = key.replace("\\n", "\n")
+        _pk = serialization.load_pem_private_key(key.encode(), password=None)
+    return _pk
+
+def _auth_headers(method, path):
+    ts = str(int(time.time() * 1000))
+    msg = f"{ts}{method}{path}".encode()
+    sig = _get_private_key().sign(
         msg,
-        asym_padding.PSS(
-            mgf=asym_padding.MGF1(hashes.SHA256()),
-            salt_length=asym_padding.PSS.DIGEST_LENGTH,
-        ),
+        asym_padding.PSS(mgf=asym_padding.MGF1(hashes.SHA256()),
+                         salt_length=asym_padding.PSS.DIGEST_LENGTH),
         hashes.SHA256(),
     )
     return {
         "KALSHI-ACCESS-KEY": KALSHI_KEY_ID,
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
         "Content-Type": "application/json",
     }
 
 
+# ── Step 1: Build series lookup table (public endpoint, no auth) ──────────────
+
+def fetch_series_lookup():
+    """Returns {series_ticker: {category, frequency, tags}} for filtering."""
+    print("Fetching series catalog (public)...")
+    r = requests.get(f"{KALSHI_BASE}/series", timeout=60)
+    r.raise_for_status()
+    series_list = r.json().get("series", [])
+    lookup = {}
+    for s in series_list:
+        lookup[s["ticker"]] = {
+            "category":  s.get("category", ""),
+            "frequency": s.get("frequency", ""),
+            "tags":      s.get("tags") or [],
+        }
+    print(f"  Loaded {len(lookup)} series templates")
+    return lookup
+
+
+# ── Step 2: Fetch all open events (auto-excludes combos) ──────────────────────
+
 def fetch_open_events():
-    """Events endpoint auto-excludes multivariate combos. with_nested_markets gives us prices."""
+    """Events endpoint auto-excludes multivariate (combo/parlay) markets."""
     events = []
     cursor = None
-    print("Fetching Kalshi events (combos auto-excluded)...")
-    for page in range(15):
+    print("Fetching open events...")
+    for page in range(20):
         path = "/trade-api/v2/events"
-        headers = make_auth_headers("GET", path)
+        headers = _auth_headers("GET", path)
         params = {"limit": 200, "status": "open", "with_nested_markets": "true"}
         if cursor:
             params["cursor"] = cursor
@@ -70,187 +104,240 @@ def fetch_open_events():
     return events
 
 
-def prepare_for_claude(events):
-    """Each event = one entry with title + all sub-markets formatted for analysis."""
-    formatted = []
+# ── Step 3: Hard filter using series metadata ─────────────────────────────────
+
+def hard_filter(events, series_lookup):
+    kept = []
+    dropped_cat = 0
+    dropped_freq = 0
+
     for ev in events:
         title = (ev.get("title") or "").strip()
         if not title:
             continue
-        markets = ev.get("markets", [])
-        if not markets:
+
+        series_ticker = ev.get("series_ticker", "")
+        meta = series_lookup.get(series_ticker, {})
+        category = meta.get("category", "") or ev.get("category", "")
+        frequency = meta.get("frequency", "")
+        tags = meta.get("tags", [])
+
+        if category in DROP_CATEGORIES:
+            dropped_cat += 1
             continue
-        market_lines = []
-        total_vol = 0.0
+
+        if frequency in DROP_FREQUENCIES_ALL:
+            dropped_freq += 1
+            continue
+
+        if frequency == "weekly" and category in DROP_WEEKLY_FOR:
+            dropped_freq += 1
+            continue
+
+        markets = ev.get("markets", [])
+        market_summaries = []
         for m in markets:
-            sub = (m.get("yes_sub_title") or m.get("title") or "").strip()
-            yes_bid = m.get("yes_bid_dollars") or "0"
-            vol = float(m.get("volume_fp") or 0)
-            total_vol += vol
-            market_lines.append(f"  - {sub}: yes ${yes_bid} (vol {int(vol)})")
-        formatted.append({
+            if m.get("status") not in ("active", "open", None):
+                continue
+            sub = m.get("yes_sub_title") or m.get("title") or ""
+            market_summaries.append({
+                "ticker": m.get("ticker", ""),
+                "sub": sub.strip(),
+                "yes_bid": m.get("yes_bid_dollars", ""),
+                "volume": m.get("volume_fp", "0"),
+                "close_time": m.get("close_time", ""),
+            })
+
+        if not market_summaries:
+            continue
+
+        kept.append({
             "event_ticker": ev.get("event_ticker", ""),
             "title": title,
-            "category": (ev.get("category") or "").strip(),
             "subtitle": (ev.get("sub_title") or "").strip(),
-            "markets_text": "\n".join(market_lines),
-            "n_markets": len(markets),
-            "total_volume": total_vol,
+            "category": category,
+            "frequency": frequency,
+            "tags": tags,
+            "markets": market_summaries,
+            "n_markets": len(market_summaries),
         })
-    random.shuffle(formatted)
-    sample = formatted[:200]
-    print(f"Total events with markets: {len(formatted)}, sampling {len(sample)}")
-    print("Sample of events being analyzed:")
-    for ev in sample[:15]:
-        print(f"  [{ev['category']}] ({ev['n_markets']}m, vol {int(ev['total_volume'])}) {ev['title'][:80]}")
-    return sample
+
+    print(f"Hard filter: {len(events)} events -> {len(kept)} kept "
+          f"(dropped {dropped_cat} by category, {dropped_freq} by frequency)")
+
+    from collections import Counter
+    cats = Counter(e["category"] for e in kept)
+    print(f"Category breakdown: {dict(cats.most_common(15))}")
+
+    return kept
 
 
-SYSTEM_PROMPT = """You are an expert prediction-market analyst evaluating Kalshi events for edge.
+# ── Step 4: Claude picks 10-15 interesting markets ────────────────────────────
 
-You're hunting for mispriced markets using the Alex/Landtrader framework (Risk Takers Ep 149). There are FOUR edge types worth picking:
+SYSTEM_PROMPT = """You are a market surfacing tool for a prediction market trader.
 
-1. HIDDEN CONSTRAINT — market resolves on a technical/legal condition the crowd ignores. (Mercy rule kicks in. "Death of Ayatollah" doesn't count as "out of power" per the rules. Exact resolution wording.)
+Your job is to pick the 10-15 most interesting Kalshi events from the list you receive.
+"Interesting" means: a person with the right industry knowledge, connections, or domain
+expertise could have an informational edge on this market.
 
-2. BEHAVIORAL OBSERVATION — public info the crowd hasn't priced. (Athlete tweets at 10am, so the 6-10hr bracket is impossible. Player has flu but it's only on local beat reporter Twitter.)
+Examples of interesting markets:
+- "Will credit card rates be capped in 2026?" -> someone at a bank would know
+- "Will the FDA approve X for medical use?" -> someone in pharma would know
+- "Assistant Secretary of Treasury confirmation" -> someone on the Hill would know
+- "Will Perplexity acquire Chrome?" -> someone in tech M&A would know
+- "ISM PMI report" -> a macro economist would know
+- "Will Bill Belichick coach a UNC game?" -> weird structural sports question
+- "RTX PRO 6000 monthly price" -> someone in GPU supply chain would know
 
-3. NARRATIVE vs REALITY — crowd prices the story, not the mechanics. (Dunk contest contestant priced at 15¢ because YouTube searches surfaced his more athletic brother.)
+Examples of NOT interesting:
+- "NBA Northwest Division Winner" -> just a standard sports outcome
+- "Billboard Top 200 #1" -> pure pop culture guessing
+- "Oscars Best Picture" -> no domain edge possible
+- "Will it rain in Houston tomorrow?" -> pure weather
 
-4. UNDER-THE-RADAR REGULATORY/LEGISLATIVE — niche policy and economic markets where domain knowledge gives edge. (FDA approvals, agency rulings, specific bills, monetary policy nuances.)
+PRIORITIZE newer markets (recently created) since they are less efficiently priced.
 
-REJECT these aggressively:
-- Generic "Team X wins game" sports markets (no edge unless a specific hidden constraint applies)
-- Markets where the price clearly already reflects the obvious answer
-- Award/season-long markets with no near-term resolution
-- Anything where you can't articulate WHY the crowd is wrong
+For each pick, write ONE sentence explaining what kind of person would have edge
+on this market.
 
-Be ruthless. Most events will not have edge — that's fine. Score 7+ only if you can articulate genuine mispricing.
-
-Return ONLY a JSON array. Each pick:
+Return ONLY a JSON array with 10-15 items:
 {
   "event_ticker": "...",
-  "score": 7-10,
-  "edge_type": "hidden_constraint" | "behavioral" | "narrative_vs_reality" | "regulatory",
-  "thesis": "2-3 sentences explaining what the crowd is missing",
-  "best_market": "which sub-market and direction (yes/no)"
-}
+  "one_liner": "One sentence on who would have edge and why this market is interesting"
+}"""
 
-If nothing meets the bar, return []. Quality over quantity. Aim for 3-7 picks max."""
-
-
-def score_with_claude(events):
-    blocks = []
+def ask_claude(events):
+    lines = []
     for ev in events:
-        blocks.append(
-            f"=== {ev['event_ticker']} ===\n"
-            f"Title: {ev['title']}\n"
-            f"Category: {ev['category']}\n"
-            f"Subtitle: {ev['subtitle']}\n"
-            f"Total volume: {int(ev['total_volume'])}\n"
-            f"Markets:\n{ev['markets_text']}"
+        tag_str = ", ".join(ev["tags"][:3]) if ev["tags"] else ""
+        lines.append(
+            f"[{ev['event_ticker']}] ({ev['category']}"
+            f"{' / ' + tag_str if tag_str else ''}) "
+            f"{ev['title']}"
+            f"{' -- ' + ev['subtitle'] if ev['subtitle'] else ''}"
+            f" ({ev['n_markets']} markets)"
         )
+
     user_msg = (
-        f"Today is {datetime.utcnow().strftime('%Y-%m-%d')}.\n\n"
-        "Evaluate these Kalshi events for edge using the four-edge framework. "
-        "Be selective — most won't qualify.\n\n"
-        "EVENTS:\n\n" + "\n\n".join(blocks) +
-        "\n\nReturn your picks as a JSON array only. No prose before or after."
+        f"Today is {datetime.datetime.utcnow().strftime('%A, %B %d, %Y')}.\n\n"
+        f"Here are {len(lines)} open Kalshi events after pre-filtering. "
+        f"Pick the 10-15 most interesting ones.\n\n"
+        + "\n".join(lines)
+        + "\n\nReturn JSON array only. No markdown."
     )
-    print("Sending to Claude...")
+
+    print(f"Sending {len(lines)} event titles to Claude...")
     r = requests.post(
-        ANTHROPIC_BASE,
+        "https://api.anthropic.com/v1/messages",
         headers={
             "x-api-key": ANTHROPIC_KEY,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         },
         json={
-            "model": ANTHROPIC_MODEL,
+            "model": "claude-sonnet-4-6",
             "max_tokens": 4096,
             "system": SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": user_msg}],
         },
-        timeout=180,
+        timeout=120,
     )
     r.raise_for_status()
     text = r.json()["content"][0]["text"].strip()
+
     start, end = text.find("["), text.rfind("]")
     if start == -1 or end == -1:
-        print(f"No JSON array in response. First 500 chars: {text[:500]}")
+        print(f"No JSON array in response. First 500 chars:\n{text[:500]}")
         return []
+
     try:
         picks = json.loads(text[start:end+1])
     except json.JSONDecodeError as e:
-        print(f"JSON parse failed: {e}")
+        print(f"JSON parse error: {e}")
         return []
-    by_ticker = {ev["event_ticker"]: ev for ev in events}
-    enriched = []
+
+    print(f"Claude returned {len(picks)} picks")
+    return picks
+
+
+# ── Step 5: Build email ───────────────────────────────────────────────────────
+
+def build_email(picks, events_by_ticker):
+    today = datetime.datetime.utcnow().strftime("%A, %B %d, %Y")
+    cards = ""
     for p in picks:
-        t = p.get("event_ticker", "")
-        if t in by_ticker:
-            p["_event"] = by_ticker[t]
-            enriched.append(p)
-    print(f"Claude returned {len(enriched)} picks")
-    return enriched
+        ticker = p.get("event_ticker", "")
+        ev = events_by_ticker.get(ticker, {})
+        one_liner = p.get("one_liner", "")
+        category = ev.get("category", "")
+        title = ev.get("title", ticker)
+        subtitle = ev.get("subtitle", "")
 
+        markets = ev.get("markets", [])
+        market_info = ""
+        if markets:
+            m = markets[0]
+            market_info = f"Yes ${m.get('yes_bid', '?')} · Vol {m.get('volume', '?')}"
+            if m.get("close_time"):
+                try:
+                    dt = datetime.datetime.fromisoformat(
+                        m["close_time"].replace("Z", "+00:00"))
+                    market_info += f" · Closes {dt.strftime('%b %d, %Y')}"
+                except Exception:
+                    pass
 
-def format_email_html(picks):
-    if not picks:
-        return "<html><body><p>No picks today — nothing met the edge bar.</p></body></html>"
-    rows = []
-    for p in picks:
-        ev = p.get("_event", {})
-        score = p.get("score", 0)
-        color = "#22c55e" if score >= 8 else "#eab308"
-        edge_label = p.get("edge_type", "").replace("_", " ").upper()
-        ticker = ev.get("event_ticker", "").lower()
-        rows.append(f'''
-<div style="border:1px solid #e2e8f0; border-radius:10px; padding:18px; margin-bottom:14px; background:white;">
-  <div style="display:flex; justify-content:space-between; gap:12px;">
-    <div style="flex:1;">
-      <div style="font-size:11px; color:#64748b; letter-spacing:0.05em; font-weight:600;">{ev.get('category','')} · {edge_label}</div>
-      <div style="font-size:16px; font-weight:600; margin-top:4px; color:#0f172a;">{ev.get('title','')}</div>
-    </div>
-    <div style="background:{color}; color:white; font-weight:700; padding:6px 12px; border-radius:8px; font-size:14px; height:fit-content;">{score}/10</div>
+        link_ticker = ticker.lower()
+
+        cards += f"""
+<div style="border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:12px;background:white;">
+  <div style="font-size:11px;color:#64748b;letter-spacing:0.04em;font-weight:600;margin-bottom:4px;">{category}</div>
+  <div style="font-size:15px;font-weight:600;color:#0f172a;line-height:1.4;">{title}</div>
+  {"<div style='font-size:13px;color:#475569;margin-top:2px;'>" + subtitle + "</div>" if subtitle else ""}
+  <div style="font-size:13px;color:#334155;margin-top:8px;line-height:1.5;font-style:italic;">{one_liner}</div>
+  <div style="margin-top:10px;font-size:12px;color:#64748b;">{market_info}</div>
+  <div style="margin-top:8px;">
+    <a href="https://kalshi.com/markets/{link_ticker}" style="font-size:13px;color:#3b82f6;text-decoration:none;">Open on Kalshi &rarr;</a>
   </div>
-  <div style="margin-top:12px; color:#334155; font-size:14px; line-height:1.55;">{p.get('thesis','')}</div>
-  <div style="margin-top:12px; padding:10px 12px; background:#f1f5f9; border-radius:6px; font-size:13px; color:#475569;">
-    <strong style="color:#0f172a;">Trade idea:</strong> {p.get('best_market','')}
-  </div>
-  <div style="margin-top:10px; font-size:12px;">
-    <a href="https://kalshi.com/markets/{ticker}" style="color:#3b82f6; text-decoration:none;">Open on Kalshi →</a>
-  </div>
-</div>''')
-    return f'''<html><body style="font-family:-apple-system,Segoe UI,sans-serif; background:#f8fafc; max-width:640px; margin:0 auto; padding:24px;">
-<h1 style="font-size:22px; margin:0 0 4px 0; color:#0f172a;">Kalshi Morning Scan</h1>
-<p style="color:#64748b; margin:0 0 20px 0; font-size:14px;">{datetime.utcnow().strftime('%A, %B %d, %Y')} · {len(picks)} picks</p>
-{''.join(rows)}
-</body></html>'''
+</div>"""
+
+    return f"""<html><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f8fafc;max-width:640px;margin:0 auto;padding:24px;">
+<h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">Kalshi Morning Scan</h1>
+<p style="color:#64748b;margin:0 0 20px;font-size:14px;">{today} &middot; {len(picks)} markets worth a look</p>
+{cards}
+<p style="font-size:11px;color:#cbd5e1;text-align:center;margin-top:20px;">Not financial advice &middot; Do your own research</p>
+</body></html>"""
 
 
-def send_email(picks):
+# ── Step 6: Send email ────────────────────────────────────────────────────────
+
+def send_email(html, pick_count):
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Kalshi Scan · {len(picks)} picks · {datetime.utcnow().strftime('%b %d')}"
+    msg["Subject"] = f"Kalshi Scan · {pick_count} markets · {datetime.datetime.utcnow().strftime('%b %d')}"
     msg["From"] = GMAIL_USER
     msg["To"] = EMAIL_TO
-    msg.attach(MIMEText(format_email_html(picks), "html"))
+    msg.attach(MIMEText(html, "html"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(GMAIL_USER, GMAIL_PASS)
         s.send_message(msg)
-    print(f"Sent email with {len(picks)} picks to {EMAIL_TO}")
+    print(f"Email sent to {EMAIL_TO}")
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    series_lookup = fetch_series_lookup()
     events = fetch_open_events()
-    sample = prepare_for_claude(events)
-    if not sample:
-        print("No events to analyze")
+    filtered = hard_filter(events, series_lookup)
+    if not filtered:
+        print("No events survived filtering.")
         return
-    picks = score_with_claude(sample)
+    picks = ask_claude(filtered)
     if not picks:
-        print("No picks — skipping email")
+        print("Claude returned no picks.")
         return
-    send_email(picks)
+    events_by_ticker = {e["event_ticker"]: e for e in filtered}
+    html = build_email(picks, events_by_ticker)
+    send_email(html, len(picks))
 
 
 if __name__ == "__main__":
