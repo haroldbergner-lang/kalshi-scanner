@@ -91,11 +91,18 @@ def prepare_for_claude(markets: list[dict]) -> list[dict]:
         # Filter out sports and entertainment categories before sending to Claude
         skip_keywords = ["nba", "nfl", "nhl", "mlb", "nascar", "golf", "mma", "ufc",
                          "boxing", "soccer", "tennis", "parlay", "oscar", "emmy",
-                         "grammy", "celebrity", "reality tv"]
+                         "grammy", "celebrity", "reality tv", "manchester", "bournemouth",
+                         "lakers", "celtics", "knicks", "warriors", "clippers", "spurs",
+                         "pistons", "cavaliers", "milan", "champions league", "premier league",
+                         "or above", "cunningham", "banchero", "wembanyama", "gilgeous"]
         title_lower = title.lower()
         if any(kw in title_lower for kw in skip_keywords):
             continue
         if any(kw in category for kw in ["sports", "entertainment", "pop culture"]):
+            continue
+        # Skip markets that look like parlays (contain multiple "yes" or "no" legs)
+        yes_no_count = title_lower.count("yes ") + title_lower.count("no ")
+        if yes_no_count >= 2:
             continue
 
         cleaned.append({
