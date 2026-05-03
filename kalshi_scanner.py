@@ -104,6 +104,9 @@ def prepare_for_claude(markets: list[dict]) -> list[dict]:
     from collections import Counter
     cats = Counter(m["category"] for m in cleaned[:300])
     print(f"Top categories in candidate set: {cats.most_common(10)}")
+    print("Sample titles:")
+    for m in cleaned[:20]:
+        print(f"  [{m['volume']}] {m['title']}")
 
     return cleaned[:300]
 
