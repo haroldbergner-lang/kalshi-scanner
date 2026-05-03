@@ -23,7 +23,7 @@ GMAIL_USER          = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD  = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO            = os.environ["EMAIL_TO"]
 
-KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 def get_private_key():
     # GitHub secrets sometimes strip newlines — restore them
