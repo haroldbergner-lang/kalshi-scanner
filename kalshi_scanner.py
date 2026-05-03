@@ -143,7 +143,7 @@ Return ONLY a raw JSON array — no markdown, no backticks, no explanation. Each
   "close_time": "ISO date string or empty"
 }}
 
-Return your top 6 picks regardless of score. Every scan should return at least 4-6 markets."""
+Return your top 6 picks. Every scan must return at least 4-6 markets. NEVER pick sports parlays, MMA cards, golf parlays, or NBA parlays. ONLY pick legislative, regulatory, FDA, corporate, or economic markets."""
 
     print("Sending to Claude for analysis...")
     response = client.messages.create(
