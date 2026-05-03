@@ -87,6 +87,9 @@ def prepare_for_claude(markets: list[dict]) -> list[dict]:
         title = (m.get("title") or "").strip()
         if not title:
             continue
+        # Debug first 5 titles
+        if len(cleaned) < 5:
+            print(f"RAW TITLE: {repr(title[:80])}")
         # Skip parlay legs - these always start with "yes" or "no" followed by a space
         if title.lower().startswith("yes ") or title.lower().startswith("no "):
             continue
