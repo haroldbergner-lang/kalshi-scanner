@@ -463,13 +463,17 @@ def run_mentions():
             event_date = parse_event_date_from_ticker(m.get("ticker", ""))
             if event_date:
                 break
+        actual_date = event_date or upcoming[0]["close_dt"]
+        # Skip events that already happened
+        if actual_date < now:
+            continue
         mentions.append({
             "event_ticker": ev.get("event_ticker", ""),
             "title": title,
             "subtitle": (ev.get("sub_title") or "").strip(),
             "tags": meta.get("tags", []),
             "markets": upcoming,
-            "event_date": event_date or upcoming[0]["close_dt"],
+            "event_date": actual_date,
         })
 
     print(f"Found {len(mentions)} Mentions events closing in next 30 days")
