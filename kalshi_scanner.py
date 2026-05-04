@@ -486,35 +486,21 @@ Return a JSON array:
         + "\n\nReturn JSON array only. No markdown."
     )
 
-    print(f"Sending {len(lines)} mentions to Claude...")
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_KEY,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 4096,
-            "system": mentions_prompt,
-            "messages": [{"role": "user", "content": user_msg}],
-        },
-        timeout=120,
-    )
-    r.raise_for_status()
-    text = r.json()["content"][0]["text"].strip()
-    start, end = text.find("["), text.rfind("]")
-    if start == -1 or end == -1:
-        print(f"No JSON from Claude: {text[:300]}")
-        return
-    try:
-        enriched = json.loads(text[start:end+1])
-    except json.JSONDecodeError as e:
-        print(f"JSON error: {e}")
-        return
-
-    enrich_map = {e["event_ticker"]: e for e in enriched}
+    # No Claude needed for mentions — just format directly based on tags
+    enrich_map = {}
+    for ev in mentions:
+        tags = ev.get("tags", [])
+        if "Earnings" in tags:
+            where = "Company investor relations page, Bloomberg, or CNBC"
+        elif "Politicians" in tags:
+            where = "C-SPAN, cable news networks, or official livestream"
+        else:
+            where = "Check Kalshi market page for event details"
+        enrich_map[ev["event_ticker"]] = {
+            "description": ev["title"],
+            "where_to_watch": where,
+        }
+    print(f"Formatted {len(mentions)} mentions (no Claude needed)")
 
     # Sort by earliest close time, group by day
     mentions.sort(key=lambda x: x["markets"][0]["close_dt"])
