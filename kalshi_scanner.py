@@ -32,6 +32,11 @@ DROP_FREQUENCIES_ALL = {"daily"}  # drops daily across ALL categories
 # Drop weekly ONLY for Entertainment (Billboard, Netflix rankings, etc.)
 DROP_WEEKLY_FOR = {"Entertainment"}
 
+# For these categories, ONLY keep one_off frequency (drops regular games, state races)
+# This keeps weird structural markets like "NFL Receiving Yards Record" or
+# "Will any independent win a House or Senate race?"
+ONLY_ONE_OFF_FOR = {"Sports", "Elections"}
+
 _pk = None
 def _get_private_key():
     global _pk
