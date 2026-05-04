@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run scanner
+      - name: Run market scanner
         env:
           KALSHI_API_KEY:       ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY:   ${{ secrets.KALSHI_PRIVATE_KEY }}
@@ -28,6 +28,16 @@ jobs:
           GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO:             ${{ secrets.EMAIL_TO }}
         run: python kalshi_scanner.py
+
+      - name: Run mentions scanner
+        env:
+          KALSHI_API_KEY:       ${{ secrets.KALSHI_API_KEY }}
+          KALSHI_PRIVATE_KEY:   ${{ secrets.KALSHI_PRIVATE_KEY }}
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_USER:           ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO:             ${{ secrets.EMAIL_TO }}
+        run: python kalshi_scanner.py --mentions
 
       - name: Save sent tickers
         run: |
