@@ -139,6 +139,11 @@ def hard_filter(events, series_lookup):
             dropped_freq += 1
             continue
 
+
+        # Sports & Elections: only keep one_off (weird structural markets)
+        if category in {"Sports", "Elections"} and frequency != "one_off":
+            dropped_freq += 1
+            continue
         markets = ev.get("markets", [])
         market_summaries = []
         for m in markets:
