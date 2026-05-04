@@ -394,5 +394,9 @@ def main():
     print(f"Saved {len(sent_tickers)} tickers to sent_tickers.json")
 
 
+import sys
 if __name__ == "__main__":
-    main()
+    if "--mentions" in sys.argv:
+        print("Mentions email coming soon — not yet implemented.")
+    else:
+        main()
