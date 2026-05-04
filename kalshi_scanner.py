@@ -394,9 +394,186 @@ def main():
     print(f"Saved {len(sent_tickers)} tickers to sent_tickers.json")
 
 
+# ── Mentions "What to Watch" Email ─────────────────────────────────────────────
+
+def run_mentions():
+    """Fetch Mentions events closing in next 7 days, format as What to Watch email."""
+    series_lookup = fetch_series_lookup()
+    events = fetch_open_events()
+
+    now = datetime.datetime.utcnow()
+    cutoff = now + datetime.timedelta(days=7)
+    mentions = []
+
+    for ev in events:
+        title = (ev.get("title") or "").strip()
+        if not title:
+            continue
+
+        series_ticker = ev.get("series_ticker", "")
+        meta = series_lookup.get(series_ticker, {})
+        category = meta.get("category", "") or ev.get("category", "")
+
+        if category != "Mentions":
+            continue
+
+        markets = ev.get("markets", [])
+        upcoming = []
+        for m in markets:
+            close_time = m.get("close_time", "")
+            if not close_time:
+                continue
+            try:
+                ct = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                ct_naive = ct.replace(tzinfo=None)
+                if now <= ct_naive <= cutoff:
+                    upcoming.append({
+                        "ticker": m.get("ticker", ""),
+                        "sub": (m.get("yes_sub_title") or m.get("title") or "").strip(),
+                        "close_time": close_time,
+                        "close_dt": ct_naive,
+                    })
+            except Exception:
+                continue
+
+        if not upcoming:
+            continue
+
+        upcoming.sort(key=lambda x: x["close_dt"])
+        mentions.append({
+            "event_ticker": ev.get("event_ticker", ""),
+            "title": title,
+            "subtitle": (ev.get("sub_title") or "").strip(),
+            "tags": meta.get("tags", []),
+            "markets": upcoming,
+        })
+
+    print(f"Found {len(mentions)} Mentions events closing in next 7 days")
+
+    if not mentions:
+        print("No upcoming mentions events — skipping.")
+        return
+
+    # Ask Claude for descriptions and where to watch
+    lines = []
+    for ev in mentions:
+        tag_str = ", ".join(ev["tags"][:3]) if ev["tags"] else ""
+        first_close = ev["markets"][0]["close_dt"].strftime("%a %b %d, %I:%M %p UTC")
+        lines.append(
+            f"[{ev['event_ticker']}] ({tag_str}) "
+            f"{ev['title']}"
+            f"{' -- ' + ev['subtitle'] if ev['subtitle'] else ''}"
+            f" (next close: {first_close})"
+        )
+
+    mentions_prompt = """You are formatting a "What to Watch This Week" email for a prediction market trader.
+
+For each event, write:
+1. A one-sentence description of what this event is (earnings call, political appearance, etc.)
+2. Where to watch or follow it (e.g. "Bloomberg TV", "CNBC", "C-SPAN", "Company IR page", etc.)
+
+Return a JSON array:
+{
+  "event_ticker": "...",
+  "description": "One sentence on what this event is",
+  "where_to_watch": "Where to watch or follow"
+}"""
+
+    user_msg = (
+        f"Today is {now.strftime('%A, %B %d, %Y')}.\n\n"
+        f"Here are {len(lines)} Mentions events with markets closing in the next 7 days.\n\n"
+        + "\n".join(lines)
+        + "\n\nReturn JSON array only. No markdown."
+    )
+
+    print(f"Sending {len(lines)} mentions to Claude...")
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 4096,
+            "system": mentions_prompt,
+            "messages": [{"role": "user", "content": user_msg}],
+        },
+        timeout=120,
+    )
+    r.raise_for_status()
+    text = r.json()["content"][0]["text"].strip()
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        print(f"No JSON from Claude: {text[:300]}")
+        return
+    try:
+        enriched = json.loads(text[start:end+1])
+    except json.JSONDecodeError as e:
+        print(f"JSON error: {e}")
+        return
+
+    enrich_map = {e["event_ticker"]: e for e in enriched}
+
+    # Sort by earliest close time, group by day
+    mentions.sort(key=lambda x: x["markets"][0]["close_dt"])
+    from collections import OrderedDict
+    by_day = OrderedDict()
+    for ev in mentions:
+        day_key = ev["markets"][0]["close_dt"].strftime("%A, %B %d")
+        if day_key not in by_day:
+            by_day[day_key] = []
+        by_day[day_key].append(ev)
+
+    cards = ""
+    for day, day_events in by_day.items():
+        cards += f"""
+<div style="margin-top:20px;margin-bottom:8px;">
+  <div style="font-size:14px;font-weight:700;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px;">{day}</div>
+</div>"""
+        for ev in day_events:
+            info = enrich_map.get(ev["event_ticker"], {})
+            desc = info.get("description", "")
+            where = info.get("where_to_watch", "")
+            tag_label = ", ".join(ev["tags"][:2]) if ev["tags"] else "Mentions"
+            time_str = ev["markets"][0]["close_dt"].strftime("%I:%M %p UTC")
+            link_ticker = ev["event_ticker"].lower()
+
+            cards += f"""
+<div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin-bottom:10px;background:white;">
+  <div style="font-size:11px;color:#64748b;font-weight:600;">{tag_label} &middot; {time_str}</div>
+  <div style="font-size:15px;font-weight:600;color:#0f172a;margin-top:2px;">{ev['title']}</div>
+  {"<div style='font-size:13px;color:#475569;margin-top:2px;'>" + ev['subtitle'] + "</div>" if ev['subtitle'] else ""}
+  <div style="font-size:13px;color:#334155;margin-top:8px;line-height:1.5;">{desc}</div>
+  {"<div style='font-size:12px;color:#3b82f6;margin-top:6px;'>" + where + "</div>" if where else ""}
+  <div style="margin-top:8px;">
+    <a href="https://kalshi.com/markets/{link_ticker}" style="font-size:13px;color:#3b82f6;text-decoration:none;">Open on Kalshi &rarr;</a>
+  </div>
+</div>"""
+
+    today = now.strftime("%A, %B %d, %Y")
+    html = f"""<html><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f8fafc;max-width:640px;margin:0 auto;padding:24px;">
+<h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">What to Watch This Week</h1>
+<p style="color:#64748b;margin:0 0 20px;font-size:14px;">{today} &middot; {len(mentions)} upcoming events</p>
+{cards}
+<p style="font-size:11px;color:#cbd5e1;text-align:center;margin-top:20px;">Not financial advice &middot; Do your own research</p>
+</body></html>"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"What to Watch \u00b7 {len(mentions)} events \u00b7 {now.strftime('%b %d')}"
+    msg["From"] = GMAIL_USER
+    msg["To"] = EMAIL_TO
+    msg.attach(MIMEText(html, "html"))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(GMAIL_USER, GMAIL_PASS)
+        s.send_message(msg)
+    print(f"Mentions email sent to {EMAIL_TO}")
+
+
 import sys
 if __name__ == "__main__":
     if "--mentions" in sys.argv:
-        print("Mentions email coming soon — not yet implemented.")
+        run_mentions()
     else:
         main()
