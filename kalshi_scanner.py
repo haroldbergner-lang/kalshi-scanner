@@ -394,7 +394,7 @@ def main():
     print(f"Saved {len(sent_tickers)} tickers to sent_tickers.json")
 
 
-# ── Mentions "What to Watch" Email ─────────────────────────────────────────────
+# ── Mentions "Mention Markets" Email ─────────────────────────────────────────────
 
 def parse_event_date_from_ticker(ticker):
     """Extract actual event date from ticker like kxmlbmention-26may02texdet."""
@@ -414,7 +414,7 @@ def parse_event_date_from_ticker(ticker):
 
 
 def run_mentions():
-    """Fetch Mentions events closing in next 30 days, format as What to Watch email."""
+    """Fetch Mentions events closing in next 30 days, format as Mention Markets email."""
     series_lookup = fetch_series_lookup()
     events = fetch_open_events()
 
@@ -494,7 +494,7 @@ def run_mentions():
             f" (next close: {first_close})"
         )
 
-    mentions_prompt = """You are formatting a "What to Watch This Week" email for a prediction market trader.
+    mentions_prompt = """You are formatting a "Mention Markets This Week" email for a prediction market trader.
 
 For each event, write:
 1. A one-sentence description of what this event is (earnings call, political appearance, etc.)
@@ -568,14 +568,14 @@ Return a JSON array:
 
     today = now.strftime("%A, %B %d, %Y")
     html = f"""<html><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f8fafc;max-width:640px;margin:0 auto;padding:24px;">
-<h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">What to Watch This Week</h1>
+<h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">Mention Markets This Week</h1>
 <p style="color:#64748b;margin:0 0 20px;font-size:14px;">{today} &middot; {len(mentions)} upcoming events</p>
 {cards}
 <p style="font-size:11px;color:#cbd5e1;text-align:center;margin-top:20px;">Not financial advice &middot; Do your own research</p>
 </body></html>"""
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"What to Watch \u00b7 {len(mentions)} events \u00b7 {now.strftime('%b %d')}"
+    msg["Subject"] = f"Mention Markets \u00b7 {len(mentions)} events \u00b7 {now.strftime('%b %d')}"
     msg["From"] = GMAIL_USER
     msg["To"] = EMAIL_TO
     msg.attach(MIMEText(html, "html"))
