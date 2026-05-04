@@ -396,6 +396,23 @@ def main():
 
 # ── Mentions "What to Watch" Email ─────────────────────────────────────────────
 
+def parse_event_date_from_ticker(ticker):
+    """Extract actual event date from ticker like kxmlbmention-26may02texdet."""
+    import re
+    match = re.search(r'(\d{2})(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(\d{2})', ticker.lower())
+    if match:
+        year = 2000 + int(match.group(1))
+        month_str = match.group(2)
+        day = int(match.group(3))
+        months = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+                  "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+        try:
+            return datetime.datetime(year, months[month_str], day)
+        except ValueError:
+            return None
+    return None
+
+
 def run_mentions():
     """Fetch Mentions events closing in next 30 days, format as What to Watch email."""
     series_lookup = fetch_series_lookup()
@@ -440,12 +457,19 @@ def run_mentions():
             continue
 
         upcoming.sort(key=lambda x: x["close_dt"])
+        # Try to get actual event date from ticker
+        event_date = None
+        for m in upcoming:
+            event_date = parse_event_date_from_ticker(m.get("ticker", ""))
+            if event_date:
+                break
         mentions.append({
             "event_ticker": ev.get("event_ticker", ""),
             "title": title,
             "subtitle": (ev.get("sub_title") or "").strip(),
             "tags": meta.get("tags", []),
             "markets": upcoming,
+            "event_date": event_date or upcoming[0]["close_dt"],
         })
 
     print(f"Found {len(mentions)} Mentions events closing in next 30 days")
@@ -503,11 +527,11 @@ Return a JSON array:
     print(f"Formatted {len(mentions)} mentions (no Claude needed)")
 
     # Sort by earliest close time, group by day
-    mentions.sort(key=lambda x: x["markets"][0]["close_dt"])
+    mentions.sort(key=lambda x: x["event_date"])
     from collections import OrderedDict
     by_day = OrderedDict()
     for ev in mentions:
-        day_key = ev["markets"][0]["close_dt"].strftime("%A, %B %d")
+        day_key = ev["event_date"].strftime("%A, %B %d")
         if day_key not in by_day:
             by_day[day_key] = []
         by_day[day_key].append(ev)
@@ -523,7 +547,7 @@ Return a JSON array:
             desc = info.get("description", "")
             where = info.get("where_to_watch", "")
             tag_label = ", ".join(ev["tags"][:2]) if ev["tags"] else "Mentions"
-            time_str = ev["markets"][0]["close_dt"].strftime("%I:%M %p UTC")
+            time_str = ev["event_date"].strftime("%I:%M %p UTC") if ev["event_date"] else ""
             link_ticker = ev["event_ticker"].lower()
 
             cards += f"""
