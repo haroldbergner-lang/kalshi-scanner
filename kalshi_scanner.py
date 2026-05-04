@@ -397,12 +397,12 @@ def main():
 # ── Mentions "What to Watch" Email ─────────────────────────────────────────────
 
 def run_mentions():
-    """Fetch Mentions events closing in next 7 days, format as What to Watch email."""
+    """Fetch Mentions events closing in next 30 days, format as What to Watch email."""
     series_lookup = fetch_series_lookup()
     events = fetch_open_events()
 
     now = datetime.datetime.utcnow()
-    cutoff = now + datetime.timedelta(days=7)
+    cutoff = now + datetime.timedelta(days=30)
     mentions = []
 
     for ev in events:
@@ -448,7 +448,7 @@ def run_mentions():
             "markets": upcoming,
         })
 
-    print(f"Found {len(mentions)} Mentions events closing in next 7 days")
+    print(f"Found {len(mentions)} Mentions events closing in next 30 days")
 
     if not mentions:
         print("No upcoming mentions events — skipping.")
