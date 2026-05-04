@@ -464,8 +464,9 @@ def run_mentions():
             if event_date:
                 break
         actual_date = event_date or upcoming[0]["close_dt"]
-        # Skip events that already happened
-        if actual_date < now:
+        # Skip events before today (keep today's events)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if actual_date < today_start:
             continue
         mentions.append({
             "event_ticker": ev.get("event_ticker", ""),
