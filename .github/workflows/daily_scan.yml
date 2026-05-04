@@ -2,17 +2,17 @@ name: Kalshi Morning Scan
 
 on:
   schedule:
-    - cron: "0 12 * * *"  # 7am ET daily
-  workflow_dispatch:       # allows manual trigger
+    - cron: "0 12 * * *"
+  workflow_dispatch:
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -28,3 +28,11 @@ jobs:
           GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO:             ${{ secrets.EMAIL_TO }}
         run: python kalshi_scanner.py
+
+      - name: Save sent tickers
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_tickers.json || true
+          git diff --cached --quiet || git commit -m "update sent tickers [skip ci]"
+          git push || true

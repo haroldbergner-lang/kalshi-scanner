@@ -7,7 +7,7 @@ Kalshi Morning Market Scanner v3
 - Claude picks 10-15 interesting markets for a morning digest email
 """
 
-import os, json, time, base64, smtplib, datetime
+import os, json, time, base64, smtplib, datetime, pathlib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
@@ -277,12 +277,11 @@ def build_email(picks, events_by_ticker):
         market_info = ""
         if markets:
             m = markets[0]
-            market_info = f"Yes ${m.get('yes_bid', '?')} · Vol {m.get('volume', '?')}"
             if m.get("close_time"):
                 try:
                     dt = datetime.datetime.fromisoformat(
                         m["close_time"].replace("Z", "+00:00"))
-                    market_info += f" · Closes {dt.strftime('%b %d, %Y')}"
+                    market_info = f"Closes {dt.strftime('%b %d, %Y')}"
                 except Exception:
                     pass
 
@@ -324,6 +323,36 @@ def send_email(html, pick_count):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+SENT_FILE = pathlib.Path(__file__).parent / "sent_tickers.json"
+
+def load_sent_tickers():
+    """Load tickers sent in the last 7 days."""
+    if not SENT_FILE.exists():
+        return set()
+    try:
+        data = json.loads(SENT_FILE.read_text())
+    except Exception:
+        return set()
+    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat()
+    # Keep only entries from last 7 days
+    recent = {t: d for t, d in data.items() if d > cutoff}
+    return set(recent.keys())
+
+def save_sent_tickers(new_tickers):
+    """Merge new tickers with existing, prune older than 7 days."""
+    try:
+        data = json.loads(SENT_FILE.read_text()) if SENT_FILE.exists() else {}
+    except Exception:
+        data = {}
+    now = datetime.datetime.utcnow().isoformat()
+    for t in new_tickers:
+        data[t] = now
+    # Prune old entries
+    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat()
+    data = {t: d for t, d in data.items() if d > cutoff}
+    SENT_FILE.write_text(json.dumps(data, indent=2))
+
+
 def main():
     series_lookup = fetch_series_lookup()
     events = fetch_open_events()
@@ -331,6 +360,16 @@ def main():
     if not filtered:
         print("No events survived filtering.")
         return
+    # Remove markets already emailed in last 7 days
+    already_sent = load_sent_tickers()
+    before = len(filtered)
+    filtered = [e for e in filtered if e["event_ticker"] not in already_sent]
+    print(f"Dedup: {before} -> {len(filtered)} events ({before - len(filtered)} already sent)")
+
+    if not filtered:
+        print("All events already sent recently — skipping.")
+        return
+
     picks = ask_claude(filtered)
     if not picks:
         print("Claude returned no picks.")
@@ -338,6 +377,11 @@ def main():
     events_by_ticker = {e["event_ticker"]: e for e in filtered}
     html = build_email(picks, events_by_ticker)
     send_email(html, len(picks))
+
+    # Track what we sent so we don't repeat tomorrow
+    sent_tickers = [p.get("event_ticker", "") for p in picks if p.get("event_ticker")]
+    save_sent_tickers(sent_tickers)
+    print(f"Saved {len(sent_tickers)} tickers to sent_tickers.json")
 
 
 if __name__ == "__main__":
