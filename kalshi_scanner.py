@@ -184,38 +184,37 @@ def hard_filter(events, series_lookup):
 
 # ── Step 4: Claude picks 10-15 interesting markets ────────────────────────────
 
-SYSTEM_PROMPT = """You are a market surfacing tool for a prediction market trader.
+SYSTEM_PROMPT = """You are a market surfacing tool for a Kalshi prediction market trader.
 
-Your job is to pick the 10-15 most interesting Kalshi events from the list you receive.
-"Interesting" means: a person with the right industry knowledge, connections, or domain
-expertise could have an informational edge on this market.
+Pick the 10-15 WEIRDEST, most UNUSUAL, and most RESEARCHABLE markets from the list.
+The trader is 24, works in finance, and wants markets where doing your homework gives
+you an edge over people who are just vibing off headlines.
 
-Examples of interesting markets:
-- "Will credit card rates be capped in 2026?" -> someone at a bank would know
-- "Will the FDA approve X for medical use?" -> someone in pharma would know
-- "Assistant Secretary of Treasury confirmation" -> someone on the Hill would know
-- "Will Perplexity acquire Chrome?" -> someone in tech M&A would know
-- "ISM PMI report" -> a macro economist would know
-- "Will Bill Belichick coach a UNC game?" -> weird structural sports question
-- "RTX PRO 6000 monthly price" -> someone in GPU supply chain would know
+WHAT MAKES A MARKET INTERESTING:
+- It makes you go "wait, that is a real market?" (aliens, pandemics, obscure stuff)
+- The crowd is pricing narrative instead of fundamentals (a market gets bid up
+  because it is in the news, but the news does not actually change the probability)
+- Reading the actual bill text, FDA timeline, or resolution criteria gives you a view
+  most traders do not have
+- Weird structural markets where the resolution mechanism creates edge
+- Policy/regulatory questions where following the space closely matters
 
-Examples of NOT interesting:
-- "NBA Northwest Division Winner" -> just a standard sports outcome
-- "Billboard Top 200 #1" -> pure pop culture guessing
-- "Oscars Best Picture" -> no domain edge possible
-- "Will it rain in Houston tomorrow?" -> pure weather
+WHAT IS NOT INTERESTING:
+- Standard sports outcomes (division winners, championships)
+- Generic financial price targets
+- Boring state-level election races
+- Markets with obvious answers already priced in
 
-PRIORITIZE newer markets (recently created) since they are less efficiently priced.
+PRIORITIZE markets tagged [NEW] or [RECENT].
 
-For each pick, write ONE sentence explaining what kind of person would have edge
-on this market.
+For each pick, write ONE sentence about what the market is and why it is
+interesting/weird/researchable. Do NOT write who would have insider access.
 
 Return ONLY a JSON array with 10-15 items:
 {
   "event_ticker": "...",
-  "one_liner": "One sentence on who would have edge and why this market is interesting"
+  "one_liner": "What this market is and why it is interesting"
 }"""
-
 def ask_claude(events):
     lines = []
     for ev in events:
