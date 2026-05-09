@@ -437,7 +437,7 @@ def run_mentions():
     # Build simple flat list email
     cards = ""
     for ev in mentions:
-        ticker = ev["market_ticker"].upper()
+        ticker = ev["event_ticker"].lower()
         sub_html = ""
         if ev["subtitle"]:
             sub_html = '<div style="font-size:13px;color:#475569;margin-top:2px;">' + ev["subtitle"] + '</div>'
