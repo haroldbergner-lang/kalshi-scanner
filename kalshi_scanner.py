@@ -397,57 +397,52 @@ def main():
 
 
 def run_mentions():
-    """Simple: pull all Mentions events with markets closing in next 7 days."""
-    series_lookup = fetch_series_lookup()
-    events = fetch_open_events()
-
+    """Query each Mentions series directly to find all upcoming events."""
+    import requests as req
+    print("Fetching series catalog...")
+    r = req.get(f"{KALSHI_BASE}/series", timeout=60)
+    r.raise_for_status()
+    all_series = r.json().get("series", [])
+    mention_series = [s["ticker"] for s in all_series if s.get("category") == "Mentions"]
+    print(f"Found {len(mention_series)} Mentions series")
     now = datetime.datetime.utcnow()
     cutoff = now + datetime.timedelta(days=7)
     mentions = []
-
-    for ev in events:
-        title = (ev.get("title") or "").strip()
-        if not title:
-            continue
-
-        series_ticker = ev.get("series_ticker", "")
-        meta = series_lookup.get(series_ticker, {})
-        category = meta.get("category", "") or ev.get("category", "")
-
-        if category != "Mentions":
-            continue
-
-        # Find markets closing within 7 days
-        markets = ev.get("markets", [])
-        for m in markets:
-            close_time = m.get("close_time", "")
-            if not close_time:
+    print("Querying events for each Mentions series...")
+    for i, st in enumerate(mention_series):
+        try:
+            path = "/trade-api/v2/events"
+            headers = _auth_headers("GET", path)
+            params = {"series_ticker": st, "status": "open", "with_nested_markets": "true", "limit": 10}
+            r = req.get(f"{KALSHI_BASE}/events", headers=headers, params=params, timeout=15)
+            if r.status_code != 200:
                 continue
-            try:
-                ct = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-                ct_naive = ct.replace(tzinfo=None)
-                if now <= ct_naive <= cutoff:
-                    mentions.append({
-                        "title": title,
-                        "subtitle": (ev.get("sub_title") or "").strip(),
-                        "event_ticker": ev.get("event_ticker", ""),
-                        "close_dt": ct_naive,
-                        "tags": meta.get("tags", []),
-                    })
-                    break  # one entry per event
-            except Exception:
-                continue
-
+            events = r.json().get("events", [])
+            for ev in events:
+                title = (ev.get("title") or "").strip()
+                if not title:
+                    continue
+                for m in ev.get("markets", []):
+                    ct_str = m.get("close_time", "")
+                    if not ct_str:
+                        continue
+                    try:
+                        ct = datetime.datetime.fromisoformat(ct_str.replace("Z", "+00:00"))
+                        ct_naive = ct.replace(tzinfo=None)
+                        if now <= ct_naive <= cutoff:
+                            mentions.append({"title": title, "subtitle": (ev.get("sub_title") or "").strip(), "event_ticker": ev.get("event_ticker", ""), "close_dt": ct_naive})
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+        if (i + 1) % 50 == 0:
+            print(f"  Checked {i+1}/{len(mention_series)} series, found {len(mentions)} events so far")
     print(f"Found {len(mentions)} Mentions events closing in next 7 days")
-
     if not mentions:
-        print("No upcoming mentions — skipping email.")
+        print("No upcoming mentions events found.")
         return
-
-    # Sort by close date
     mentions.sort(key=lambda x: x["close_dt"])
-
-    # Group by day
     from collections import OrderedDict
     by_day = OrderedDict()
     for ev in mentions:
@@ -455,41 +450,23 @@ def run_mentions():
         if day_key not in by_day:
             by_day[day_key] = []
         by_day[day_key].append(ev)
-
-    # Build email
     cards = ""
     for day, day_events in by_day.items():
-        cards += f"""
-<div style="margin-top:20px;margin-bottom:8px;">
-  <div style="font-size:14px;font-weight:700;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px;">{day}</div>
-</div>"""
+        cards += '<div style="margin-top:20px;margin-bottom:8px;"><div style="font-size:14px;font-weight:700;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px;">' + day + '</div></div>'
         for ev in day_events:
-            tag_label = ", ".join(ev["tags"][:2]) if ev["tags"] else "Mentions"
             time_str = ev["close_dt"].strftime("%I:%M %p UTC")
-            link_ticker = ev["event_ticker"].lower()
-            cards += f"""
-<div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin-bottom:10px;background:white;">
-  <div style="font-size:11px;color:#64748b;font-weight:600;">{tag_label} &middot; {time_str}</div>
-  <div style="font-size:15px;font-weight:600;color:#0f172a;margin-top:2px;">{ev["title"]}</div>
-  {"<div style='font-size:13px;color:#475569;margin-top:2px;'>" + ev["subtitle"] + "</div>" if ev["subtitle"] else ""}
-  <div style="margin-top:8px;">
-    <a href="https://kalshi.com/markets/{link_ticker}" style="font-size:13px;color:#3b82f6;text-decoration:none;">Open on Kalshi &rarr;</a>
-  </div>
-</div>"""
-
-    today = now.strftime("%A, %B %d, %Y")
-    html = f"""<html><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f8fafc;max-width:640px;margin:0 auto;padding:24px;">
-<h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">Mention Markets This Week</h1>
-<p style="color:#64748b;margin:0 0 20px;font-size:14px;">{today} &middot; {len(mentions)} upcoming events</p>
-{cards}
-<p style="font-size:11px;color:#cbd5e1;text-align:center;margin-top:20px;">Not financial advice &middot; Do your own research</p>
-</body></html>"""
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Mention Markets - {len(mentions)} events - {now.strftime('%b %d')}"
+            link = ev["event_ticker"].lower()
+            sub_html = '<div style="font-size:13px;color:#475569;margin-top:2px;">' + ev["subtitle"] + '</div>' if ev["subtitle"] else ""
+            cards += '<div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin-bottom:10px;background:white;"><div style="font-size:11px;color:#64748b;font-weight:600;">' + time_str + '</div><div style="font-size:15px;font-weight:600;color:#0f172a;margin-top:2px;">' + ev["title"] + '</div>' + sub_html + '<div style="margin-top:8px;"><a href="https://kalshi.com/markets/' + link + '" style="font-size:13px;color:#3b82f6;text-decoration:none;">Open on Kalshi &rarr;</a></div></div>'
+    today_str = now.strftime("%A, %B %d, %Y")
+    html = '<html><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f8fafc;max-width:640px;margin:0 auto;padding:24px;"><h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">Mention Markets This Week</h1><p style="color:#64748b;margin:0 0 20px;font-size:14px;">' + today_str + ' &middot; ' + str(len(mentions)) + ' upcoming events</p>' + cards + '<p style="font-size:11px;color:#cbd5e1;text-align:center;margin-top:20px;">Not financial advice &middot; Do your own research</p></body></html>'
+    from email.mime.text import MIMEText as MT2
+    from email.mime.multipart import MIMEMultipart as MM2
+    msg = MM2("alternative")
+    msg["Subject"] = f"Mention Markets - {len(mentions)} events - {now.strftime(chr(37)+chr(98)+chr(32)+chr(37)+chr(100))}"
     msg["From"] = GMAIL_USER
     msg["To"] = EMAIL_TO
-    msg.attach(MIMEText(html, "html"))
+    msg.attach(MT2(html, "html"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(GMAIL_USER, GMAIL_PASS)
         s.send_message(msg)
