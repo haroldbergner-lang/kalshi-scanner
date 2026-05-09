@@ -395,30 +395,14 @@ def main():
 
 # ── Mentions "Mention Markets" Email ─────────────────────────────────────────────
 
-def parse_event_date_from_ticker(ticker):
-    """Extract actual event date from ticker like kxmlbmention-26may02texdet."""
-    import re
-    match = re.search(r'(\d{2})(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(\d{2})', ticker.lower())
-    if match:
-        year = 2000 + int(match.group(1))
-        month_str = match.group(2)
-        day = int(match.group(3))
-        months = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
-                  "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
-        try:
-            return datetime.datetime(year, months[month_str], day)
-        except ValueError:
-            return None
-    return None
-
 
 def run_mentions():
-    """Fetch Mentions events closing in next 30 days, format as Mention Markets email."""
+    """Simple: pull all Mentions events with markets closing in next 7 days."""
     series_lookup = fetch_series_lookup()
     events = fetch_open_events()
 
     now = datetime.datetime.utcnow()
-    cutoff = now + datetime.timedelta(days=30)
+    cutoff = now + datetime.timedelta(days=7)
     mentions = []
 
     for ev in events:
@@ -433,8 +417,8 @@ def run_mentions():
         if category != "Mentions":
             continue
 
+        # Find markets closing within 7 days
         markets = ev.get("markets", [])
-        upcoming = []
         for m in markets:
             close_time = m.get("close_time", "")
             if not close_time:
@@ -443,103 +427,36 @@ def run_mentions():
                 ct = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
                 ct_naive = ct.replace(tzinfo=None)
                 if now <= ct_naive <= cutoff:
-                    upcoming.append({
-                        "ticker": m.get("ticker", ""),
-                        "sub": (m.get("yes_sub_title") or m.get("title") or "").strip(),
-                        "close_time": close_time,
+                    mentions.append({
+                        "title": title,
+                        "subtitle": (ev.get("sub_title") or "").strip(),
+                        "event_ticker": ev.get("event_ticker", ""),
                         "close_dt": ct_naive,
+                        "tags": meta.get("tags", []),
                     })
+                    break  # one entry per event
             except Exception:
                 continue
 
-        if not upcoming:
-            continue
-
-        upcoming.sort(key=lambda x: x["close_dt"])
-        # Try to get actual event date from ticker
-        event_date = None
-        for m in upcoming:
-            event_date = parse_event_date_from_ticker(m.get("ticker", ""))
-            if event_date:
-                break
-        actual_date = event_date or upcoming[0]["close_dt"]
-        # Skip events before today (keep today's events)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        if actual_date < today_start:
-            continue
-        mentions.append({
-            "event_ticker": ev.get("event_ticker", ""),
-            "title": title,
-            "subtitle": (ev.get("sub_title") or "").strip(),
-            "tags": meta.get("tags", []),
-            "markets": upcoming,
-            "event_date": actual_date,
-        })
-
-    print(f"Found {len(mentions)} Mentions events closing in next 30 days")
+    print(f"Found {len(mentions)} Mentions events closing in next 7 days")
 
     if not mentions:
-        print("No upcoming mentions events — skipping.")
+        print("No upcoming mentions — skipping email.")
         return
 
-    # Ask Claude for descriptions and where to watch
-    lines = []
-    for ev in mentions:
-        tag_str = ", ".join(ev["tags"][:3]) if ev["tags"] else ""
-        first_close = ev["markets"][0]["close_dt"].strftime("%a %b %d, %I:%M %p UTC")
-        lines.append(
-            f"[{ev['event_ticker']}] ({tag_str}) "
-            f"{ev['title']}"
-            f"{' -- ' + ev['subtitle'] if ev['subtitle'] else ''}"
-            f" (next close: {first_close})"
-        )
+    # Sort by close date
+    mentions.sort(key=lambda x: x["close_dt"])
 
-    mentions_prompt = """You are formatting a "Mention Markets This Week" email for a prediction market trader.
-
-For each event, write:
-1. A one-sentence description of what this event is (earnings call, political appearance, etc.)
-2. Where to watch or follow it (e.g. "Bloomberg TV", "CNBC", "C-SPAN", "Company IR page", etc.)
-
-Return a JSON array:
-{
-  "event_ticker": "...",
-  "description": "One sentence on what this event is",
-  "where_to_watch": "Where to watch or follow"
-}"""
-
-    user_msg = (
-        f"Today is {now.strftime('%A, %B %d, %Y')}.\n\n"
-        f"Here are {len(lines)} Mentions events with markets closing in the next 7 days.\n\n"
-        + "\n".join(lines)
-        + "\n\nReturn JSON array only. No markdown."
-    )
-
-    # No Claude needed for mentions — just format directly based on tags
-    enrich_map = {}
-    for ev in mentions:
-        tags = ev.get("tags", [])
-        if "Earnings" in tags:
-            where = "Company investor relations page, Bloomberg, or CNBC"
-        elif "Politicians" in tags:
-            where = "C-SPAN, cable news networks, or official livestream"
-        else:
-            where = "Check Kalshi market page for event details"
-        enrich_map[ev["event_ticker"]] = {
-            "description": ev["title"],
-            "where_to_watch": where,
-        }
-    print(f"Formatted {len(mentions)} mentions (no Claude needed)")
-
-    # Sort by earliest close time, group by day
-    mentions.sort(key=lambda x: x["event_date"])
+    # Group by day
     from collections import OrderedDict
     by_day = OrderedDict()
     for ev in mentions:
-        day_key = ev["event_date"].strftime("%A, %B %d")
+        day_key = ev["close_dt"].strftime("%A, %B %d")
         if day_key not in by_day:
             by_day[day_key] = []
         by_day[day_key].append(ev)
 
+    # Build email
     cards = ""
     for day, day_events in by_day.items():
         cards += f"""
@@ -547,20 +464,14 @@ Return a JSON array:
   <div style="font-size:14px;font-weight:700;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px;">{day}</div>
 </div>"""
         for ev in day_events:
-            info = enrich_map.get(ev["event_ticker"], {})
-            desc = info.get("description", "")
-            where = info.get("where_to_watch", "")
             tag_label = ", ".join(ev["tags"][:2]) if ev["tags"] else "Mentions"
-            time_str = ev["event_date"].strftime("%I:%M %p UTC") if ev["event_date"] else ""
+            time_str = ev["close_dt"].strftime("%I:%M %p UTC")
             link_ticker = ev["event_ticker"].lower()
-
             cards += f"""
 <div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin-bottom:10px;background:white;">
   <div style="font-size:11px;color:#64748b;font-weight:600;">{tag_label} &middot; {time_str}</div>
-  <div style="font-size:15px;font-weight:600;color:#0f172a;margin-top:2px;">{ev['title']}</div>
-  {"<div style='font-size:13px;color:#475569;margin-top:2px;'>" + ev['subtitle'] + "</div>" if ev['subtitle'] else ""}
-  <div style="font-size:13px;color:#334155;margin-top:8px;line-height:1.5;">{desc}</div>
-  {"<div style='font-size:12px;color:#3b82f6;margin-top:6px;'>" + where + "</div>" if where else ""}
+  <div style="font-size:15px;font-weight:600;color:#0f172a;margin-top:2px;">{ev["title"]}</div>
+  {"<div style='font-size:13px;color:#475569;margin-top:2px;'>" + ev["subtitle"] + "</div>" if ev["subtitle"] else ""}
   <div style="margin-top:8px;">
     <a href="https://kalshi.com/markets/{link_ticker}" style="font-size:13px;color:#3b82f6;text-decoration:none;">Open on Kalshi &rarr;</a>
   </div>
@@ -575,7 +486,7 @@ Return a JSON array:
 </body></html>"""
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Mention Markets \u00b7 {len(mentions)} events \u00b7 {now.strftime('%b %d')}"
+    msg["Subject"] = f"Mention Markets - {len(mentions)} events - {now.strftime('%b %d')}"
     msg["From"] = GMAIL_USER
     msg["To"] = EMAIL_TO
     msg.attach(MIMEText(html, "html"))
