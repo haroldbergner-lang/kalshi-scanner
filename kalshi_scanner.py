@@ -435,9 +435,14 @@ def run_mentions():
                 try:
                     event_dt = datetime.datetime.fromisoformat(sd.replace("Z", "+00:00"))
                     event_naive = event_dt.replace(tzinfo=None)
+                    days_away = (event_naive - now).days
+                    if i < 20:
+                        print(f"    {st}: {title[:50]} | date={sd[:10]} | days_away={days_away}")
                     if now <= event_naive <= cutoff:
                         mentions.append({"title": title, "subtitle": (ev.get("sub_title") or "").strip(), "event_ticker": ev.get("event_ticker", ""), "close_dt": event_naive})
-                except Exception:
+                except Exception as e:
+                    if i < 20:
+                        print(f"    {st}: parse error: {e}")
                     continue
         except Exception:
             continue
