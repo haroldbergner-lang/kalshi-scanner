@@ -422,18 +422,23 @@ def run_mentions():
                 title = (ev.get("title") or "").strip()
                 if not title:
                     continue
-                for m in ev.get("markets", []):
-                    ct_str = m.get("close_time", "")
-                    if not ct_str:
-                        continue
-                    try:
-                        ct = datetime.datetime.fromisoformat(ct_str.replace("Z", "+00:00"))
-                        ct_naive = ct.replace(tzinfo=None)
-                        if now <= ct_naive <= cutoff:
-                            mentions.append({"title": title, "subtitle": (ev.get("sub_title") or "").strip(), "event_ticker": ev.get("event_ticker", ""), "close_dt": ct_naive})
+                # Use strike_date (when event actually happens) not close_time
+                sd = ev.get("strike_date", "")
+                if not sd:
+                    # Fallback to earliest market close_time
+                    for m in ev.get("markets", []):
+                        sd = m.get("close_time", "")
+                        if sd:
                             break
-                    except Exception:
-                        continue
+                if not sd:
+                    continue
+                try:
+                    event_dt = datetime.datetime.fromisoformat(sd.replace("Z", "+00:00"))
+                    event_naive = event_dt.replace(tzinfo=None)
+                    if now <= event_naive <= cutoff:
+                        mentions.append({"title": title, "subtitle": (ev.get("sub_title") or "").strip(), "event_ticker": ev.get("event_ticker", ""), "close_dt": event_naive})
+                except Exception:
+                    continue
         except Exception:
             continue
         if (i + 1) % 50 == 0:
