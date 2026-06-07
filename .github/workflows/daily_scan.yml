@@ -26,7 +26,7 @@ jobs:
         env:
           KALSHI_API_KEY:       ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY:   ${{ secrets.KALSHI_PRIVATE_KEY }}
-          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
           GMAIL_USER:           ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO:             ${{ secrets.EMAIL_TO }}
@@ -39,7 +39,7 @@ jobs:
         env:
           KALSHI_API_KEY:       ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY:   ${{ secrets.KALSHI_PRIVATE_KEY }}
-          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
           GMAIL_USER:           ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO:             ${{ secrets.EMAIL_TO }}

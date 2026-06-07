@@ -3,8 +3,8 @@ Kalshi Morning Market Scanner v3
 - Fetches series catalog (public) for category/frequency/tags metadata
 - Fetches events (auto-excludes combo/parlay markets)
 - Hard-filters by category + frequency
-- Sends ALL surviving event titles to Claude for curation
-- Claude picks 10-15 interesting markets for a morning digest email
+- Sends ALL surviving event titles to Gemini for curation
+- Gemini picks 10-15 interesting markets for a morning digest email
 """
 
 import os, json, time, base64, smtplib, datetime, pathlib
@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 KALSHI_BASE        = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_KEY_ID      = os.environ["KALSHI_API_KEY"]
 KALSHI_PRIVATE_KEY = os.environ["KALSHI_PRIVATE_KEY"]
-ANTHROPIC_KEY      = os.environ["ANTHROPIC_API_KEY"].strip()
+GEMINI_KEY         = os.environ["GEMINI_API_KEY"].strip()
 GMAIL_USER         = os.environ["GMAIL_USER"]
 GMAIL_PASS         = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO           = os.environ["EMAIL_TO"]
@@ -235,24 +235,19 @@ def ask_claude(events):
         + "\n\nReturn JSON array only. No markdown."
     )
 
-    print(f"Sending {len(lines)} event titles to Claude...")
+    print(f"Sending {len(lines)} event titles to Gemini...")
     r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_KEY,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+        headers={"Content-Type": "application/json"},
         json={
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 4096,
-            "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": user_msg}],
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
+            "generationConfig": {"maxOutputTokens": 4096, "temperature": 0.7},
         },
         timeout=120,
     )
     r.raise_for_status()
-    text = r.json()["content"][0]["text"].strip()
+    text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
     start, end = text.find("["), text.rfind("]")
     if start == -1 or end == -1:
