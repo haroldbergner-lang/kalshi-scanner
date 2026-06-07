@@ -236,17 +236,28 @@ def ask_claude(events):
     )
 
     print(f"Sending {len(lines)} event titles to Gemini...")
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
-        headers={"Content-Type": "application/json"},
-        json={
-            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
-            "generationConfig": {"maxOutputTokens": 4096, "temperature": 0.7},
-        },
-        timeout=120,
-    )
-    r.raise_for_status()
+    payload = {
+        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
+        "generationConfig": {"maxOutputTokens": 4096, "temperature": 0.7},
+    }
+    for attempt in range(4):
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=120,
+        )
+        if r.status_code == 429:
+            wait = 30 * (attempt + 1)
+            print(f"Rate limited, retrying in {wait}s...")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        break
+    else:
+        print("Gemini rate limit exceeded after retries.")
+        return []
     text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
     start, end = text.find("["), text.rfind("]")
