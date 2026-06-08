@@ -424,6 +424,17 @@ def main():
 def run_mentions():
     """Pull all open Mentions events using paginated events endpoint."""
     now = datetime.datetime.utcnow()
+
+    # Build series lookup to identify Mentions category (events don't carry category directly)
+    print("Fetching series catalog...")
+    r = requests.get(f"{KALSHI_BASE}/series", timeout=60)
+    r.raise_for_status()
+    mention_series_tickers = {
+        s["ticker"] for s in r.json().get("series", [])
+        if s.get("category") == "Mentions"
+    }
+    print(f"Found {len(mention_series_tickers)} Mentions series")
+
     mentions = []
     cursor = None
     print("Fetching open Mentions events...")
@@ -441,7 +452,7 @@ def run_mentions():
             break
         body = r.json()
         for ev in body.get("events", []):
-            if ev.get("category") != "Mentions":
+            if ev.get("series_ticker") not in mention_series_tickers:
                 continue
             title = (ev.get("title") or "").strip()
             if not title:
