@@ -223,9 +223,10 @@ DO NOT PICK:
 - Anything with an obvious answer
 
 THE ONE-LINER MUST:
-- Be specific about WHY there is edge in THIS market, not just restate what the market is
-- Mention a concrete angle: a specific data source, a timing mismatch, a resolution quirk, a crowd misconception
-- Be punchy, not a template. BAD: "This is interesting because it requires research into X." GOOD: "The crowd is pricing this off vibes — the actual FDA PDUFA date is Q3 and the phase 3 data was clean."
+- Be specific about WHY there is edge in THIS market — what do you know that the crowd doesn't?
+- Mention a concrete angle: a specific bill status, FDA timeline, vote count, resolution quirk, or crowd misconception
+- Be punchy and direct. BANNED PHRASES: "can provide an edge", "complex concept", "requires research into", "understanding X", "This market is interesting because"
+- Do NOT reason about price. Only reason about the underlying event and what creates informational edge.
 
 Return ONLY a JSON array with 10-15 items, no markdown:
 [{
@@ -236,12 +237,22 @@ def ask_claude(events):
     lines = []
     for ev in events:
         tag_str = ", ".join(ev["tags"][:3]) if ev["tags"] else ""
+        # Include close date for context
+        close_str = ""
+        if ev["markets"]:
+            ct = ev["markets"][0].get("close_time", "")
+            if ct:
+                try:
+                    dt = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                    close_str = f" closes {dt.strftime('%b %Y')}"
+                except Exception:
+                    pass
         lines.append(
             f"[{ev['event_ticker']}] ({ev['category']}"
             f"{' / ' + tag_str if tag_str else ''}) "
             f"{ev['title']}"
-            f"{' -- ' + ev['subtitle'] if ev['subtitle'] else ''}"
-            f" ({ev['n_markets']} markets)"
+            f"{' — ' + ev['subtitle'] if ev['subtitle'] else ''}"
+            f" ({ev['n_markets']} outcomes{close_str})"
         )
 
     user_msg = (
