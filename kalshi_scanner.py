@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 KALSHI_BASE        = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_KEY_ID      = os.environ["KALSHI_API_KEY"]
 KALSHI_PRIVATE_KEY = os.environ["KALSHI_PRIVATE_KEY"]
-GEMINI_KEY         = os.environ["GEMINI_API_KEY"].strip()
+GROQ_KEY           = os.environ["GROQ_API_KEY"].strip()
 GMAIL_USER         = os.environ["GMAIL_USER"]
 GMAIL_PASS         = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO           = os.environ["EMAIL_TO"]
@@ -254,16 +254,20 @@ def ask_claude(events):
         + "\n\nReturn JSON array only. No markdown."
     )
 
-    print(f"Sending {len(lines)} event titles to Gemini...")
+    print(f"Sending {len(lines)} event titles to Groq...")
     payload = {
-        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
-        "generationConfig": {"maxOutputTokens": 4096, "temperature": 0.7},
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        "max_tokens": 4096,
+        "temperature": 0.7,
     }
     for attempt in range(4):
         r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
-            headers={"Content-Type": "application/json"},
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
             json=payload,
             timeout=120,
         )
@@ -276,9 +280,9 @@ def ask_claude(events):
         r.raise_for_status()
         break
     else:
-        print("Gemini rate limit exceeded after retries.")
+        print("Groq rate limit exceeded after retries.")
         return []
-    text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    text = r.json()["choices"][0]["message"]["content"].strip()
 
     start, end = text.find("["), text.rfind("]")
     if start == -1 or end == -1:
