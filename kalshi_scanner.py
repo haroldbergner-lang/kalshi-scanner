@@ -422,76 +422,91 @@ def main():
 
 
 def run_mentions():
-    """Pull all open Mentions events and list them."""
-    print("Fetching series catalog...")
-    r = requests.get(f"{KALSHI_BASE}/series", timeout=60)
-    r.raise_for_status()
-    all_series = r.json().get("series", [])
-    mention_series = [s["ticker"] for s in all_series if s.get("category") == "Mentions"]
-    print(f"Found {len(mention_series)} Mentions series")
+    """Pull all open Mentions events using paginated events endpoint."""
     now = datetime.datetime.utcnow()
     mentions = []
-    print("Querying events for each Mentions series...")
-    for i, st in enumerate(mention_series):
+    cursor = None
+    print("Fetching open Mentions events...")
+    for page in range(20):
+        path = "/trade-api/v2/events"
+        headers = _auth_headers("GET", path)
+        params = {"limit": 200, "status": "open", "with_nested_markets": "true"}
+        if cursor:
+            params["cursor"] = cursor
         try:
-            path = "/trade-api/v2/events"
-            headers = _auth_headers("GET", path)
-            params = {"series_ticker": st, "status": "open", "with_nested_markets": "true", "limit": 10}
-            r = requests.get(f"{KALSHI_BASE}/events", headers=headers, params=params, timeout=15)
-            if r.status_code != 200:
+            r = requests.get(f"{KALSHI_BASE}/events", headers=headers, params=params, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"  Page {page+1} error: {e}")
+            break
+        body = r.json()
+        for ev in body.get("events", []):
+            if ev.get("category") != "Mentions":
                 continue
-            for ev in r.json().get("events", []):
-                title = (ev.get("title") or "").strip()
-                if not title:
-                    continue
-                subtitle = (ev.get("sub_title") or "").strip()
-                # Get first market ticker for the link
-                market_ticker = ev.get("event_ticker", "")
-                markets = ev.get("markets", [])
-                if markets:
-                    market_ticker = markets[0].get("ticker", market_ticker)
-                mentions.append({"title": title, "subtitle": subtitle, "event_ticker": ev.get("event_ticker", ""), "market_ticker": market_ticker})
-        except Exception:
-            continue
-        if (i + 1) % 50 == 0:
-            print(f"  Checked {i+1}/{len(mention_series)} series, found {len(mentions)} events")
-    print(f"Found {len(mentions)} Mentions events currently listed")
+            title = (ev.get("title") or "").strip()
+            if not title:
+                continue
+            close_time = ""
+            markets = ev.get("markets", [])
+            if markets:
+                close_time = markets[0].get("close_time", "")
+            mentions.append({
+                "title": title,
+                "subtitle": (ev.get("sub_title") or "").strip(),
+                "event_ticker": ev.get("event_ticker", ""),
+                "close_time": close_time,
+            })
+        cursor = body.get("cursor")
+        print(f"  Page {page+1}: {len(body.get('events', []))} events (total Mentions: {len(mentions)})")
+        if not cursor or not body.get("events"):
+            break
+
+    print(f"Found {len(mentions)} Mentions events")
     if not mentions:
         print("No mentions events found.")
         return
-    # Build simple flat list email
+
+    # Sort by close_time ascending (soonest closing first)
+    def parse_close(ev):
+        try:
+            return datetime.datetime.fromisoformat(ev["close_time"].replace("Z", "+00:00"))
+        except Exception:
+            return datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
+
+    mentions.sort(key=parse_close)
+
+    # Build email
     cards = ""
     for ev in mentions:
         ticker = ev["event_ticker"].lower()
-        sub_html = ""
-        if ev["subtitle"]:
-            sub_html = '<div style="font-size:13px;color:#475569;margin-top:2px;">' + ev["subtitle"] + '</div>'
-        cards += (
-            '<div style="border:1px solid #e2e8f0;border-radius:10px;'
-            'padding:14px;margin-bottom:10px;background:white;">'
-            '<div style="font-size:15px;font-weight:600;color:#0f172a;">'
-            + ev["title"] + '</div>'
-            + sub_html +
-            '<div style="margin-top:8px;">'
-            '<a href="https://kalshi.com/markets/' + ticker +
-            '" style="font-size:13px;color:#3b82f6;text-decoration:none;">'
-            'Open on Kalshi &rarr;</a></div></div>'
-        )
+        sub_html = f'<div style="font-size:13px;color:#475569;margin-top:2px;">{ev["subtitle"]}</div>' if ev["subtitle"] else ""
+        close_html = ""
+        try:
+            dt = datetime.datetime.fromisoformat(ev["close_time"].replace("Z", "+00:00"))
+            close_html = f'<div style="font-size:12px;color:#94a3b8;margin-top:6px;">Closes {dt.strftime("%b %d, %Y")}</div>'
+        except Exception:
+            pass
+        # Deep link works on both Kalshi app (mobile) and web
+        kalshi_url = f"https://kalshi.com/markets/{ticker}"
+        cards += f"""<div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin-bottom:10px;background:white;">
+  <div style="font-size:15px;font-weight:600;color:#0f172a;">{ev["title"]}</div>
+  {sub_html}
+  {close_html}
+  <div style="margin-top:8px;">
+    <a href="{kalshi_url}" style="font-size:13px;color:#3b82f6;text-decoration:none;">Open on Kalshi &rarr;</a>
+  </div>
+</div>"""
+
     today_str = now.strftime("%A, %B %d, %Y")
-    html = (
-        '<html><body style="font-family:-apple-system,Segoe UI,sans-serif;'
-        'background:#f8fafc;max-width:640px;margin:0 auto;padding:24px;">'
-        '<h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">'
-        'Mention Markets</h1>'
-        '<p style="color:#64748b;margin:0 0 20px;font-size:14px;">'
-        + today_str + ' &middot; ' + str(len(mentions)) + ' markets</p>'
-        + cards +
-        '<p style="font-size:11px;color:#cbd5e1;text-align:center;'
-        'margin-top:20px;">Not financial advice &middot; Do your own research</p>'
-        '</body></html>'
-    )
+    html = f"""<html><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f8fafc;max-width:640px;margin:0 auto;padding:24px;">
+<h1 style="font-size:22px;margin:0 0 4px;color:#0f172a;">Mention Markets</h1>
+<p style="color:#64748b;margin:0 0 20px;font-size:14px;">{today_str} &middot; {len(mentions)} markets</p>
+{cards}
+<p style="font-size:11px;color:#cbd5e1;text-align:center;margin-top:20px;">Not financial advice &middot; Do your own research</p>
+</body></html>"""
+
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Mention Markets - " + str(len(mentions)) + " markets - " + now.strftime("%b %d")
+    msg["Subject"] = f"Mention Markets · {len(mentions)} markets · {now.strftime('%b %d')}"
     msg["From"] = GMAIL_USER
     msg["To"] = EMAIL_TO
     msg.attach(MIMEText(html, "html"))
