@@ -182,6 +182,25 @@ def hard_filter(events, series_lookup):
     return kept
 
 
+# ── Step 3b: Trim to ~300 events before sending to Gemini ────────────────────
+
+def trim_for_llm(events, limit=300):
+    """
+    Prioritize one_off events (most unusual/structural), then fill with others.
+    Keeps the prompt well within Gemini free-tier token limits.
+    """
+    one_off = [e for e in events if e.get("frequency") == "one_off"]
+    others  = [e for e in events if e.get("frequency") != "one_off"]
+
+    # Sort others by volume descending so we keep the most active markets
+    others.sort(key=lambda e: float(e["markets"][0].get("volume", 0) if e["markets"] else 0), reverse=True)
+
+    trimmed = one_off + others
+    trimmed = trimmed[:limit]
+    print(f"Trim: {len(events)} -> {len(trimmed)} events for LLM ({len(one_off)} one_off + {min(len(others), limit - len(one_off))} others)")
+    return trimmed
+
+
 # ── Step 4: Claude picks 10-15 interesting markets ────────────────────────────
 
 SYSTEM_PROMPT = """You are a market surfacing tool for a Kalshi prediction market trader.
@@ -385,7 +404,7 @@ def main():
         print("All events already sent recently — skipping.")
         return
 
-    picks = ask_claude(filtered)
+    picks = ask_claude(trim_for_llm(filtered))
     if not picks:
         print("Claude returned no picks.")
         return
