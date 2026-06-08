@@ -205,35 +205,33 @@ def trim_for_llm(events, limit=300):
 
 SYSTEM_PROMPT = """You are a market surfacing tool for a Kalshi prediction market trader.
 
-Pick the 10-15 WEIRDEST, most UNUSUAL, and most RESEARCHABLE markets from the list.
-The trader is 24, works in finance, and wants markets where doing your homework gives
-you an edge over people who are just vibing off headlines.
+Pick the 10-15 BEST markets from the list. The trader is 24, works in finance, and
+wants markets where doing homework gives an edge over people guessing from headlines.
 
-WHAT MAKES A MARKET INTERESTING:
-- It makes you go "wait, that is a real market?" (aliens, pandemics, obscure stuff)
-- The crowd is pricing narrative instead of fundamentals (a market gets bid up
-  because it is in the news, but the news does not actually change the probability)
-- Reading the actual bill text, FDA timeline, or resolution criteria gives you a view
-  most traders do not have
-- Weird structural markets where the resolution mechanism creates edge
-- Policy/regulatory questions where following the space closely matters
+WHAT MAKES A MARKET WORTH PICKING:
+- Makes you go "wait, that's a real market?" — aliens, pandemics, niche regulatory stuff
+- The crowd is pricing narrative not fundamentals (news moved the price but didn't change the base rate)
+- Reading the actual bill text, FDA timeline, or resolution criteria gives a different view than the crowd
+- Weird structural markets where the resolution mechanism itself creates edge
+- Policy/science/tech questions where following the space closely matters
 
-WHAT IS NOT INTERESTING:
-- Standard sports outcomes (division winners, championships)
-- Generic financial price targets
-- Boring state-level election races
-- Markets with obvious answers already priced in
+DO NOT PICK:
+- Any foreign country election (Ghanaian, Georgian, Australian, etc.) — boring, illiquid, no edge
+- Standard sports championships or division winners
+- Generic financial price targets (S&P at X, rate cuts, etc.)
+- Celebrity gossip / album release dates
+- Anything with an obvious answer
 
-PRIORITIZE markets tagged [NEW] or [RECENT].
+THE ONE-LINER MUST:
+- Be specific about WHY there is edge in THIS market, not just restate what the market is
+- Mention a concrete angle: a specific data source, a timing mismatch, a resolution quirk, a crowd misconception
+- Be punchy, not a template. BAD: "This is interesting because it requires research into X." GOOD: "The crowd is pricing this off vibes — the actual FDA PDUFA date is Q3 and the phase 3 data was clean."
 
-For each pick, write ONE sentence about what the market is and why it is
-interesting/weird/researchable. Do NOT write who would have insider access.
-
-Return ONLY a JSON array with 10-15 items:
-{
+Return ONLY a JSON array with 10-15 items, no markdown:
+[{
   "event_ticker": "...",
-  "one_liner": "What this market is and why it is interesting"
-}"""
+  "one_liner": "..."
+}]"""
 def ask_claude(events):
     lines = []
     for ev in events:
