@@ -323,8 +323,11 @@ def build_email(picks, events_by_ticker):
 
         markets = ev.get("markets", [])
         market_info = ""
+        market_ticker = ticker  # fallback
         if markets:
             m = markets[0]
+            if m.get("ticker"):
+                market_ticker = m["ticker"]
             if m.get("close_time"):
                 try:
                     dt = datetime.datetime.fromisoformat(
@@ -333,7 +336,7 @@ def build_email(picks, events_by_ticker):
                 except Exception:
                     pass
 
-        link_ticker = ticker.lower()
+        link_ticker = market_ticker.lower()
 
         cards += f"""
 <div style="border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:12px;background:white;">
