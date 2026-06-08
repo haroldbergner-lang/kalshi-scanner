@@ -269,7 +269,8 @@ def ask_claude(events):
         )
         if r.status_code == 429:
             wait = 30 * (attempt + 1)
-            print(f"Rate limited, retrying in {wait}s...")
+            print(f"Rate limited (attempt {attempt+1}): {r.text[:300]}")
+            print(f"Retrying in {wait}s...")
             time.sleep(wait)
             continue
         r.raise_for_status()
