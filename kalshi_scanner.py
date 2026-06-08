@@ -425,13 +425,20 @@ def run_mentions():
     """Pull all open Mentions events using paginated events endpoint."""
     now = datetime.datetime.utcnow()
 
+    # Build set of Mentions series tickers (category filter on events API is unreliable)
+    print("Fetching series catalog for Mentions lookup...")
+    sr = requests.get(f"{KALSHI_BASE}/series", timeout=60)
+    sr.raise_for_status()
+    mention_series = {s["ticker"] for s in sr.json().get("series", []) if s.get("category") == "Mentions"}
+    print(f"Found {len(mention_series)} Mentions series")
+
     mentions = []
     cursor = None
-    print("Fetching open Mentions events...")
+    print("Fetching all open events and filtering for Mentions...")
     for page in range(20):
         path = "/trade-api/v2/events"
         headers = _auth_headers("GET", path)
-        params = {"limit": 200, "status": "open", "with_nested_markets": "true", "category": "Mentions"}
+        params = {"limit": 200, "status": "open", "with_nested_markets": "true"}
         if cursor:
             params["cursor"] = cursor
         try:
@@ -441,7 +448,11 @@ def run_mentions():
             print(f"  Page {page+1} error: {e}")
             break
         body = r.json()
+        page_mentions = 0
         for ev in body.get("events", []):
+            if ev.get("series_ticker") not in mention_series:
+                continue
+            page_mentions += 1
             title = (ev.get("title") or "").strip()
             if not title:
                 continue
@@ -456,7 +467,7 @@ def run_mentions():
                 "close_time": close_time,
             })
         cursor = body.get("cursor")
-        print(f"  Page {page+1}: {len(body.get('events', []))} events (total Mentions: {len(mentions)})")
+        print(f"  Page {page+1}: {len(body.get('events', []))} events, {page_mentions} Mentions (total: {len(mentions)})")
         if not cursor or not body.get("events"):
             break
 
