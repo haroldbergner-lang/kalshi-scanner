@@ -404,7 +404,7 @@ def main():
         print("All events already sent recently — skipping.")
         return
 
-    picks = ask_claude(trim_for_llm(filtered))
+    picks = ask_claude(trim_for_llm(filtered, limit=100))
     if not picks:
         print("Claude returned no picks.")
         return
