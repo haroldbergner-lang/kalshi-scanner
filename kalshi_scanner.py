@@ -433,43 +433,41 @@ def run_mentions():
     print(f"Found {len(mention_series)} Mentions series")
 
     mentions = []
-    cursor = None
-    print("Fetching all open events and filtering for Mentions...")
-    for page in range(20):
-        path = "/trade-api/v2/events"
-        headers = _auth_headers("GET", path)
-        params = {"limit": 200, "status": "open", "with_nested_markets": "true"}
-        if cursor:
-            params["cursor"] = cursor
-        try:
-            r = requests.get(f"{KALSHI_BASE}/events", headers=headers, params=params, timeout=30)
-            r.raise_for_status()
-        except Exception as e:
-            print(f"  Page {page+1} error: {e}")
-            break
-        body = r.json()
-        page_mentions = 0
-        for ev in body.get("events", []):
-            if ev.get("series_ticker") not in mention_series:
-                continue
-            page_mentions += 1
-            title = (ev.get("title") or "").strip()
-            if not title:
-                continue
-            close_time = ""
-            markets = ev.get("markets", [])
-            if markets:
-                close_time = markets[0].get("close_time", "")
-            mentions.append({
-                "title": title,
-                "subtitle": (ev.get("sub_title") or "").strip(),
-                "event_ticker": ev.get("event_ticker", ""),
-                "close_time": close_time,
-            })
-        cursor = body.get("cursor")
-        print(f"  Page {page+1}: {len(body.get('events', []))} events, {page_mentions} Mentions (total: {len(mentions)})")
-        if not cursor or not body.get("events"):
-            break
+    print("Fetching open Mentions events by series...")
+    for i, series_ticker in enumerate(sorted(mention_series)):
+        cursor = None
+        while True:
+            path = "/trade-api/v2/events"
+            headers = _auth_headers("GET", path)
+            params = {"limit": 200, "status": "open", "with_nested_markets": "true", "series_ticker": series_ticker}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                r = requests.get(f"{KALSHI_BASE}/events", headers=headers, params=params, timeout=30)
+                r.raise_for_status()
+            except Exception as e:
+                print(f"  Series {series_ticker} error: {e}")
+                break
+            body = r.json()
+            for ev in body.get("events", []):
+                title = (ev.get("title") or "").strip()
+                if not title:
+                    continue
+                close_time = ""
+                markets = ev.get("markets", [])
+                if markets:
+                    close_time = markets[0].get("close_time", "")
+                mentions.append({
+                    "title": title,
+                    "subtitle": (ev.get("sub_title") or "").strip(),
+                    "event_ticker": ev.get("event_ticker", ""),
+                    "close_time": close_time,
+                })
+            cursor = body.get("cursor")
+            if not cursor or not body.get("events"):
+                break
+        if (i + 1) % 50 == 0:
+            print(f"  Checked {i+1}/{len(mention_series)} series, found {len(mentions)} events so far")
 
     print(f"Found {len(mentions)} Mentions events")
     if not mentions:
