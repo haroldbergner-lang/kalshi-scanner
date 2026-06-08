@@ -163,6 +163,7 @@ def hard_filter(events, series_lookup):
 
         kept.append({
             "event_ticker": ev.get("event_ticker", ""),
+            "series_ticker": series_ticker,
             "title": title,
             "subtitle": (ev.get("sub_title") or "").strip(),
             "category": category,
@@ -336,7 +337,7 @@ def build_email(picks, events_by_ticker):
                 except Exception:
                     pass
 
-        link_ticker = market_ticker.lower()
+        link_ticker = ev.get("series_ticker", market_ticker).lower()
 
         cards += f"""
 <div style="border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:12px;background:white;">
