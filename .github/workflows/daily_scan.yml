@@ -1,8 +1,9 @@
 name: Kalshi Morning Scan
 
 on:
-  schedule:
-    - cron: "0 10 * * *"
+  # Daily schedule disabled; run manually from the Actions tab.
+  # schedule:
+  #   - cron: "0 10 * * *"
   workflow_dispatch:
 
 permissions:
